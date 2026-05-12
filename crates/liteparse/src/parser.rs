@@ -82,7 +82,7 @@ impl LiteParse {
                 &mut pages,
                 &pdf_path,
                 self.config.dpi,
-                &engine,
+                engine.as_ref(),
                 &self.config.ocr_language,
             )?;
         }

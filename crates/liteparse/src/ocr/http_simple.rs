@@ -49,21 +49,21 @@ impl HttpOcrEngine {
             let result = self.recognize(i, 0, 0, &options)?;
             results.push(result);
         }
-        return Ok(results);
+        Ok(results)
     }
 }
 
 impl OcrEngine for HttpOcrEngine {
     fn name(&self) -> &str {
-        return &self.name;
+        &self.name
     }
 
-    fn recognize<'a, 'b>(
+    fn recognize(
         &self,
-        image_data: &'a [u8],
+        image_data: &[u8],
         _width: u32,
         _height: u32,
-        options: &'b OcrOptions,
+        options: &OcrOptions,
     ) -> Result<Vec<OcrResult>, Box<dyn std::error::Error>> {
         let client = Client::new();
         let form = Form::new()

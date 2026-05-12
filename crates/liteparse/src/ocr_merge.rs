@@ -11,7 +11,7 @@ pub fn ocr_and_merge_pages(
     pages: &mut [Page],
     pdf_path: &str,
     dpi: f32,
-    ocr_engine: &Box<dyn OcrEngine>,
+    ocr_engine: &dyn OcrEngine,
     ocr_language: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let lib = Library::init();
