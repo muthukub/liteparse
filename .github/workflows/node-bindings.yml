@@ -1,0 +1,276 @@
+name: Node.js Bindings
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  # pdfium-sys auto-downloads during build, this ensures consistent version
+  PDFIUM_RELEASE_TAG: chromium/7827
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            node-arch: darwin-arm64
+            pdfium-dylib: libpdfium.dylib
+
+          - os: macos-13
+            target: x86_64-apple-darwin
+            node-arch: darwin-x64
+            pdfium-dylib: libpdfium.dylib
+
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            node-arch: linux-x64-gnu
+            pdfium-dylib: libpdfium.so
+
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            node-arch: linux-arm64-gnu
+            pdfium-dylib: libpdfium.so
+            use-cross: true
+
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            node-arch: win32-x64-msvc
+            pdfium-dylib: pdfium.dll
+
+    runs-on: ${{ matrix.os }}
+    name: Build ${{ matrix.node-arch }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.use-cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Install dependencies
+        working-directory: packages/node
+        run: npm ci
+
+      - name: Build native module
+        working-directory: packages/node
+        run: npx napi build --cargo-cwd ../../crates/liteparse-napi --platform --release --js false --dts native.d.ts --target ${{ matrix.target }} .
+
+      - name: Copy pdfium dylib (Unix)
+        if: runner.os != 'Windows'
+        working-directory: packages/node
+        run: bash scripts/copy-pdfium.sh .
+
+      - name: Copy pdfium dylib (Windows)
+        if: runner.os == 'Windows'
+        working-directory: packages/node
+        shell: pwsh
+        run: |
+          # Find pdfium.dll in the build cache
+          $cacheBase = "$env:LOCALAPPDATA\pdfium-rs"
+          if (-not (Test-Path $cacheBase)) {
+            $cacheBase = "$env:USERPROFILE\.cache\pdfium-rs"
+          }
+          $dll = Get-ChildItem -Path $cacheBase -Recurse -Filter "pdfium.dll" | Select-Object -First 1
+          if ($dll) {
+            Copy-Item $dll.FullName -Destination ".\pdfium.dll"
+            Write-Host "Copied $($dll.FullName) -> .\pdfium.dll"
+          } else {
+            # Also check for pdfium.dll.lib -> the actual DLL is in bin/
+            $dllLib = Get-ChildItem -Path $cacheBase -Recurse -Filter "pdfium.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $dllLib) {
+              Write-Error "Could not find pdfium.dll in cache"
+              exit 1
+            }
+          }
+
+      - name: Build TypeScript
+        working-directory: packages/node
+        run: npx tsc
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.node-arch }}
+          path: |
+            packages/node/*.node
+            packages/node/${{ matrix.pdfium-dylib }}
+          if-no-files-found: error
+
+  # Test the built binaries on their native platforms
+  test:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            node-arch: darwin-arm64
+          - os: macos-13
+            node-arch: darwin-x64
+          - os: ubuntu-latest
+            node-arch: linux-x64-gnu
+          - os: windows-latest
+            node-arch: win32-x64-msvc
+    runs-on: ${{ matrix.os }}
+    name: Test ${{ matrix.node-arch }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        working-directory: packages/node
+        run: npm ci
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: bindings-${{ matrix.node-arch }}
+          path: packages/node
+
+      - name: Build TypeScript
+        working-directory: packages/node
+        run: npx tsc
+
+      - name: Smoke test
+        working-directory: packages/node
+        run: |
+          node -e "
+            import('./dist/lib.js').then(async ({ LiteParse }) => {
+              const p = new LiteParse({ ocrEnabled: false, quiet: true });
+              console.log('Config:', JSON.stringify(p.getConfig()));
+              console.log('Native module loaded successfully');
+            });
+          "
+
+  # Publish to npm on version tags
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    name: Publish to npm
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        working-directory: packages/node
+        run: npm ci
+
+      - name: Build TypeScript
+        working-directory: packages/node
+        run: npx tsc
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare platform packages
+        working-directory: packages/node
+        run: |
+          # Create and publish platform-specific packages
+          declare -A PLATFORMS=(
+            ["darwin-arm64"]="aarch64-apple-darwin"
+            ["darwin-x64"]="x86_64-apple-darwin"
+            ["linux-x64-gnu"]="x86_64-unknown-linux-gnu"
+            ["linux-arm64-gnu"]="aarch64-unknown-linux-gnu"
+            ["win32-x64-msvc"]="x86_64-pc-windows-msvc"
+          )
+
+          for ARCH in "${!PLATFORMS[@]}"; do
+            PKG_NAME="@llamaindex/liteparse-${ARCH}"
+            PKG_DIR="npm/${ARCH}"
+            ARTIFACT_DIR="../../artifacts/bindings-${ARCH}"
+
+            if [ ! -d "$ARTIFACT_DIR" ]; then
+              echo "Skipping ${ARCH} - no artifacts found"
+              continue
+            fi
+
+            mkdir -p "$PKG_DIR"
+
+            # Copy native files
+            cp "$ARTIFACT_DIR"/*.node "$PKG_DIR/" 2>/dev/null || true
+            cp "$ARTIFACT_DIR"/*.dylib "$PKG_DIR/" 2>/dev/null || true
+            cp "$ARTIFACT_DIR"/*.so "$PKG_DIR/" 2>/dev/null || true
+            cp "$ARTIFACT_DIR"/*.dll "$PKG_DIR/" 2>/dev/null || true
+
+            # Determine OS and CPU for package.json
+            case "$ARCH" in
+              darwin-arm64)  OS="darwin"; CPU="arm64" ;;
+              darwin-x64)    OS="darwin"; CPU="x64" ;;
+              linux-x64-gnu) OS="linux";  CPU="x64" ;;
+              linux-arm64-gnu) OS="linux"; CPU="arm64" ;;
+              win32-x64-msvc) OS="win32"; CPU="x64" ;;
+            esac
+
+            VERSION=$(node -p "require('./package.json').version")
+
+            cat > "$PKG_DIR/package.json" << PKGJSON
+          {
+            "name": "${PKG_NAME}",
+            "version": "${VERSION}",
+            "os": ["${OS}"],
+            "cpu": ["${CPU}"],
+            "main": "liteparse.${ARCH}.node",
+            "files": ["*.node", "*.dylib", "*.so", "*.dll"],
+            "license": "Apache-2.0",
+            "repository": {
+              "type": "git",
+              "url": "https://github.com/run-llama/liteparse.git"
+            }
+          }
+          PKGJSON
+
+            echo "Created platform package: ${PKG_NAME}"
+            ls -la "$PKG_DIR/"
+          done
+
+      - name: Publish platform packages
+        working-directory: packages/node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for dir in npm/*/; do
+            if [ -f "$dir/package.json" ]; then
+              echo "Publishing $(node -p "require('./${dir}/package.json').name")..."
+              cd "$dir"
+              npm publish --access public --provenance || true
+              cd ../../
+            fi
+          done
+
+      - name: Publish main package
+        working-directory: packages/node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance

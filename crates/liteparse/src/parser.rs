@@ -8,7 +8,7 @@ use crate::ocr::tesseract::TesseractOcrEngine;
 use crate::ocr_merge;
 use crate::output::{json, text};
 use crate::projection;
-use crate::types::ParsedPage;
+use crate::types::{ParsedPage, PdfInput};
 
 /// Result of parsing a document.
 pub struct ParseResult {
@@ -28,21 +28,32 @@ impl LiteParse {
         Self { config }
     }
 
-    /// Parse a document file, returning structured results.
+    /// Parse a document from a file path, returning structured results.
+    ///
+    /// Non-PDF files are automatically converted to PDF first (requires
+    /// LibreOffice/ImageMagick on the system).
     pub async fn parse(&self, input: &str) -> Result<ParseResult, Box<dyn std::error::Error>> {
+        // Resolve file path to a PdfInput (convert non-PDFs first)
+        let pdf_input = if conversion::is_pdf(input) {
+            PdfInput::Path(input.to_string())
+        } else {
+            let converted = conversion::convert_to_pdf(input, self.config.password.as_deref())
+                .await?;
+            PdfInput::Path(converted.pdf_path)
+        };
+
+        self.parse_input(pdf_input).await
+    }
+
+    /// Parse a document from either a file path or raw bytes.
+    ///
+    /// Use `PdfInput::Path` for files on disk or `PdfInput::Bytes` for
+    /// in-memory PDF data (e.g. from a network response or Node.js Buffer).
+    pub async fn parse_input(&self, input: PdfInput) -> Result<ParseResult, Box<dyn std::error::Error>> {
         let log = |msg: &str| {
             if !self.config.quiet {
                 eprintln!("{}", msg);
             }
-        };
-
-        // Resolve input to a PDF path (convert if needed)
-        let pdf_path = if conversion::is_pdf(input) {
-            input.to_string()
-        } else {
-            conversion::convert_to_pdf(input, self.config.password.as_deref())
-                .await?
-                .pdf_path
         };
 
         let t0 = std::time::Instant::now();
@@ -57,8 +68,8 @@ impl LiteParse {
             .map_err(|e| format!("invalid --target-pages: {}", e))?;
 
         // Extract text items from PDF pages
-        let mut pages = extract::extract_pages_filtered(
-            &pdf_path,
+        let mut pages = extract::extract_pages_from_input(
+            &input,
             target_pages.as_deref(),
             self.config.max_pages,
             self.config.password.as_deref(),
@@ -84,9 +95,9 @@ impl LiteParse {
                     return Err("OCR enabled but no --ocr-server-url provided and tesseract feature is disabled".into());
                 }
             };
-            ocr_merge::ocr_and_merge_pages(
+            ocr_merge::ocr_and_merge_pages_from_input(
                 &mut pages,
-                &pdf_path,
+                &input,
                 self.config.dpi,
                 engine.as_ref(),
                 &self.config.ocr_language,

@@ -1,0 +1,80 @@
+{
+  "name": "@llamaindex/liteparse",
+  "version": "2.0.0",
+  "description": "Fast, lightweight PDF and document parsing with spatial text extraction",
+  "type": "module",
+  "main": "./dist/lib.js",
+  "types": "./dist/lib.d.ts",
+  "bin": {
+    "lit": "./dist/cli.js",
+    "liteparse": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/lib.d.ts",
+      "import": "./dist/lib.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "napi": {
+    "name": "liteparse",
+    "triples": {
+      "defaults": true,
+      "additional": [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl"
+      ]
+    }
+  },
+  "files": [
+    "dist",
+    "*.node",
+    "*.dylib",
+    "*.so",
+    "*.dll",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build:rs": "napi build --cargo-cwd ../../crates/liteparse-napi --platform --release --js false --dts native.d.ts .",
+    "build:pdfium": "bash scripts/copy-pdfium.sh .",
+    "build:ts": "tsc",
+    "build": "npm run build:rs && npm run build:pdfium && npm run build:ts",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "commander": "^12.0.0"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.4",
+    "@types/node": "^22.0.0",
+    "typescript": "~5.9.2"
+  },
+  "optionalDependencies": {
+    "@llamaindex/liteparse-darwin-arm64": "2.0.0",
+    "@llamaindex/liteparse-darwin-x64": "2.0.0",
+    "@llamaindex/liteparse-linux-arm64-gnu": "2.0.0",
+    "@llamaindex/liteparse-linux-arm64-musl": "2.0.0",
+    "@llamaindex/liteparse-linux-x64-gnu": "2.0.0",
+    "@llamaindex/liteparse-linux-x64-musl": "2.0.0",
+    "@llamaindex/liteparse-win32-x64-msvc": "2.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "pdf",
+    "parser",
+    "ocr",
+    "text-extraction",
+    "pdf-to-text",
+    "document-parsing"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/run-llama/liteparse.git"
+  },
+  "author": "LlamaIndex",
+  "license": "Apache-2.0"
+}
