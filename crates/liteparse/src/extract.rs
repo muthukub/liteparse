@@ -1,4 +1,4 @@
-use crate::types::{Page as LitePage, TextItem};
+use crate::types::{Page as LitePage, PdfInput, TextItem};
 use pdfium::{Font, FontType, Library, Page, RectF, TextPage};
 
 /// Extract pages from a PDF file and return them as structured data.
@@ -48,6 +48,60 @@ pub fn extract_pages_filtered(
 ) -> Result<Vec<LitePage>, Box<dyn std::error::Error>> {
     let lib = Library::init();
     let document = lib.load_document(pdf_path, password)?;
+    let page_count = document.page_count();
+    let mut pages = Vec::new();
+
+    for page_index in 0..page_count {
+        let page_number = page_index as u32 + 1;
+
+        if let Some(targets) = target_pages
+            && !targets.contains(&page_number)
+        {
+            continue;
+        }
+
+        if pages.len() >= max_pages {
+            break;
+        }
+
+        let page = document.page(page_index)?;
+        let text_page = page.text()?;
+        let view_box = page.view_box().unwrap_or(RectF {
+            left: 0.0,
+            top: page.height(),
+            right: page.width(),
+            bottom: 0.0,
+        });
+        let text_items = extract_page_text_items(&page, &text_page, &view_box)?;
+
+        pages.push(LitePage {
+            page_number: page_number as usize,
+            page_width: page.width(),
+            page_height: page.height(),
+            text_items,
+        });
+    }
+
+    Ok(pages)
+}
+
+/// Extract pages from a `PdfInput` (file path or bytes) with filtering.
+///
+/// Returns `(pages, pdf_data)` where `pdf_data` is the owned byte buffer when
+/// input was `PdfInput::Bytes`. The caller should keep `pdf_data` alive as long
+/// as any pdfium objects derived from it are in use. This is needed because
+/// pdfium's memory-loaded documents require the buffer to outlive the document.
+pub fn extract_pages_from_input(
+    input: &PdfInput,
+    target_pages: Option<&[u32]>,
+    max_pages: usize,
+    password: Option<&str>,
+) -> Result<Vec<LitePage>, Box<dyn std::error::Error>> {
+    let lib = Library::init();
+    let document = match input {
+        PdfInput::Path(path) => lib.load_document(path, password)?,
+        PdfInput::Bytes(data) => lib.load_document_from_bytes(data, password)?,
+    };
     let page_count = document.page_count();
     let mut pages = Vec::new();
 

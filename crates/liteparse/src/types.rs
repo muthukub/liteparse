@@ -19,6 +19,18 @@ pub enum InputType {
     Buffer(Vec<u8>),
 }
 
+/// Input source for PDF parsing — either a file path or raw bytes.
+///
+/// When using `Bytes`, the data is kept alive alongside the pdfium `Document`
+/// (pdfium requires the buffer to outlive the document handle).
+#[derive(Debug, Clone)]
+pub enum PdfInput {
+    /// Path to a PDF file on disk.
+    Path(String),
+    /// Raw PDF bytes (e.g. from a network response or in-memory buffer).
+    Bytes(Vec<u8>),
+}
+
 /// Represents a single text item extracted from a PDF page,
 /// including its content, position, size, rotation, and font metadata.
 #[derive(Debug, Clone, Serialize)]

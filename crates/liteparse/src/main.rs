@@ -1,9 +1,9 @@
 use clap::{Args, Parser, Subcommand};
-use liteparse_rs::config::{LiteParseConfig, OutputFormat};
-use liteparse_rs::conversion;
-use liteparse_rs::extract;
-use liteparse_rs::parser::LiteParse;
-use liteparse_rs::render;
+use liteparse::config::{LiteParseConfig, OutputFormat};
+use liteparse::conversion;
+use liteparse::extract;
+use liteparse::parser::LiteParse;
+use liteparse::render;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -225,7 +225,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let target_pages = cmd
                 .target_pages
                 .as_ref()
-                .map(|s| liteparse_rs::config::parse_target_pages(s))
+                .map(|s| liteparse::config::parse_target_pages(s))
                 .transpose()
                 .map_err(|e| format!("invalid --target-pages: {}", e))?;
 

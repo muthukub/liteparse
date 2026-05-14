@@ -1,5 +1,5 @@
 use crate::ocr::{OcrEngine, OcrOptions};
-use crate::types::{Page, TextItem};
+use crate::types::{Page, PdfInput, TextItem};
 use image::{ImageBuffer, Rgba};
 use pdfium::Library;
 
@@ -14,8 +14,29 @@ pub fn ocr_and_merge_pages(
     ocr_engine: &dyn OcrEngine,
     ocr_language: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    ocr_and_merge_pages_from_input(
+        pages,
+        &PdfInput::Path(pdf_path.to_string()),
+        dpi,
+        ocr_engine,
+        ocr_language,
+    )
+}
+
+/// Run OCR on pages that need it and merge results into text_items.
+/// Accepts a `PdfInput` for either file path or in-memory bytes.
+pub fn ocr_and_merge_pages_from_input(
+    pages: &mut [Page],
+    input: &PdfInput,
+    dpi: f32,
+    ocr_engine: &dyn OcrEngine,
+    ocr_language: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let lib = Library::init();
-    let document = lib.load_document(pdf_path, None)?;
+    let document = match input {
+        PdfInput::Path(path) => lib.load_document(path, None)?,
+        PdfInput::Bytes(data) => lib.load_document_from_bytes(data, None)?,
+    };
 
     for page in pages.iter_mut() {
         let text_length: usize = page.text_items.iter().map(|item| item.text.len()).sum();
