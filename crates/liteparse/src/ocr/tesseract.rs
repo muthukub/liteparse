@@ -45,8 +45,13 @@ impl OcrEngine for TesseractOcrEngine {
         width: u32,
         height: u32,
         options: &'b OcrOptions,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error>>> + Send + '_>>
-    {
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
+                + Send
+                + '_,
+        >,
+    > {
         Box::pin(async move {
             let language = Self::normalize_language(&options.language);
 

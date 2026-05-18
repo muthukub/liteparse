@@ -58,6 +58,8 @@ struct ParseCommand {
     password: Option<String>,
     #[arg(short, long)]
     quiet: bool,
+    #[arg(long)]
+    num_workers: Option<usize>,
 }
 
 #[derive(Args, Debug)]
@@ -101,6 +103,8 @@ struct BatchParseCommand {
     password: Option<String>,
     #[arg(short, long)]
     quiet: bool,
+    #[arg(long)]
+    num_workers: Option<usize>,
 }
 
 #[derive(Args, Debug)]
@@ -127,7 +131,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Parse(cmd) => {
             let format = parse_output_format(&cmd.format)?;
-            let config = LiteParseConfig {
+            let mut config = LiteParseConfig {
                 ocr_language: cmd.ocr_language,
                 ocr_enabled: !cmd.no_ocr,
                 tessdata_path: cmd.tessdata_path,
@@ -139,7 +143,11 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 password: cmd.password,
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
+                ..Default::default()
             };
+            if let Some(n) = cmd.num_workers {
+                config.num_workers = n;
+            }
             let lp = LiteParse::new(config);
             let result = rt.block_on(lp.parse(&cmd.file))?;
             let formatted = match lp.config().output_format {
@@ -200,7 +208,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
 
-            let config = LiteParseConfig {
+            let mut config = LiteParseConfig {
                 ocr_language: cmd.ocr_language,
                 ocr_enabled: !cmd.no_ocr,
                 tessdata_path: cmd.tessdata_path,
@@ -212,7 +220,11 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 password: cmd.password,
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
+                ..Default::default()
             };
+            if let Some(n) = cmd.num_workers {
+                config.num_workers = n;
+            }
 
             let lp = LiteParse::new(config);
             let out_ext = if format == OutputFormat::Json {

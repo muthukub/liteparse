@@ -137,8 +137,9 @@ impl LiteParse {
                 &mut pages,
                 &input,
                 self.config.dpi,
-                engine.as_ref(),
+                engine,
                 &self.config.ocr_language,
+                self.config.num_workers,
             )
             .await?;
         }

@@ -26,6 +26,7 @@ export interface LiteParseNativeConfig {
   preserveVerySmallText?: boolean;
   password?: string;
   quiet?: boolean;
+  numWorkers?: number;
 }
 
 export interface NativeTextItem {

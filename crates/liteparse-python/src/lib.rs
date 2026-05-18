@@ -188,6 +188,7 @@ impl LiteParse {
         preserve_very_small_text = None,
         password = None,
         quiet = None,
+        num_workers = None,
     ))]
     fn new(
         ocr_language: Option<String>,
@@ -201,6 +202,7 @@ impl LiteParse {
         preserve_very_small_text: Option<bool>,
         password: Option<String>,
         quiet: Option<bool>,
+        num_workers: Option<usize>,
     ) -> PyResult<Self> {
         let mut cfg = LiteParseConfig::default();
         if let Some(v) = ocr_language {
@@ -238,6 +240,9 @@ impl LiteParse {
         }
         if let Some(v) = quiet {
             cfg.quiet = v;
+        }
+        if let Some(v) = num_workers {
+            cfg.num_workers = v;
         }
 
         let inner = liteparse::parser::LiteParse::new(cfg.clone());

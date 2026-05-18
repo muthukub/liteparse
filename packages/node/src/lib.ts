@@ -26,6 +26,7 @@ export interface LiteParseConfig {
   preserveVerySmallText: boolean;
   password?: string;
   quiet: boolean;
+  numWorkers: number;
 }
 
 export interface TextItem {
@@ -80,6 +81,7 @@ export class LiteParse {
       preserveVerySmallText: userConfig.preserveVerySmallText,
       password: userConfig.password,
       quiet: userConfig.quiet,
+      numWorkers: userConfig.numWorkers,
     };
 
     this._native = new native.LiteParse(nativeConfig);
@@ -98,6 +100,7 @@ export class LiteParse {
       preserveVerySmallText: resolved.preserveVerySmallText ?? false,
       password: resolved.password ?? undefined,
       quiet: resolved.quiet ?? false,
+      numWorkers: resolved.numWorkers ?? 1,
     };
   }
 

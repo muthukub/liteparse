@@ -29,6 +29,7 @@ program
   .option("--password <password>", "Password for encrypted documents")
   .option("--config <file>", "JSON config file path")
   .option("-q, --quiet", "Suppress progress output")
+  .option("--num-workers <n>", "Number of concurrent OCR workers", parseInt)
   .action(async (file: string, opts: Record<string, unknown>) => {
     try {
       const config: Partial<LiteParseConfig> = {};
@@ -53,6 +54,7 @@ program
       if (opts.preserveSmallText) config.preserveVerySmallText = true;
       if (opts.password) config.password = opts.password as string;
       if (opts.quiet) config.quiet = true;
+      if (opts.numWorkers) config.numWorkers = opts.numWorkers as number;
 
       // Default CLI output to text (library defaults to json)
       if (!config.outputFormat) config.outputFormat = "text";

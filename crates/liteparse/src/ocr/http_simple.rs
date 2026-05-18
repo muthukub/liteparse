@@ -51,8 +51,13 @@ impl OcrEngine for HttpOcrEngine {
         _width: u32,
         _height: u32,
         options: &'b OcrOptions,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error>>> + Send + '_>>
-    {
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
+                + Send
+                + '_,
+        >,
+    > {
         Box::pin(async move {
             let client = Client::new();
             let form = Form::new()

@@ -33,7 +33,13 @@ pub trait OcrEngine: Send + Sync {
         width: u32,
         height: u32,
         options: &'b OcrOptions,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error>>> + Send + '_>>;
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
+                + Send
+                + '_,
+        >,
+    >;
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -45,7 +51,12 @@ pub trait OcrEngine {
         width: u32,
         height: u32,
         options: &'b OcrOptions,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error>>> + '_>>;
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
+                + '_,
+        >,
+    >;
 }
 
 #[cfg(test)]
@@ -65,7 +76,10 @@ mod tests {
             options: &'b OcrOptions,
         ) -> Pin<
             Box<
-                dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error>>> + Send + '_,
+                dyn Future<
+                        Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>,
+                    > + Send
+                    + '_,
             >,
         > {
             Box::pin(async move {

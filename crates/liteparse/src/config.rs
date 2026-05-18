@@ -25,6 +25,8 @@ pub struct LiteParseConfig {
     pub password: Option<String>,
     /// Suppress progress output.
     pub quiet: bool,
+    /// Number of concurrent OCR workers. Defaults to (number of CPU cores - 1), minimum 1.
+    pub num_workers: usize,
 }
 
 /// Supported output formats.
@@ -49,8 +51,16 @@ impl Default for LiteParseConfig {
             preserve_very_small_text: false,
             password: None,
             quiet: false,
+            num_workers: default_num_workers(),
         }
     }
+}
+
+/// Returns the default number of OCR workers: CPU cores - 1, minimum 1.
+fn default_num_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().saturating_sub(1).max(1))
+        .unwrap_or(1)
 }
 
 /// Parse a target pages string like "1-5,10,15-20" into a sorted list of page numbers.

@@ -33,6 +33,8 @@ pub struct JsLiteParseConfig {
     pub password: Option<String>,
     /// Suppress progress output.
     pub quiet: Option<bool>,
+    /// Number of concurrent OCR workers (default: CPU cores - 1).
+    pub num_workers: Option<u32>,
 }
 
 impl JsLiteParseConfig {
@@ -74,6 +76,9 @@ impl JsLiteParseConfig {
         if let Some(v) = self.quiet {
             cfg.quiet = v;
         }
+        if let Some(v) = self.num_workers {
+            cfg.num_workers = v as usize;
+        }
         cfg
     }
 
@@ -93,6 +98,7 @@ impl JsLiteParseConfig {
             preserve_very_small_text: Some(cfg.preserve_very_small_text),
             password: cfg.password.clone(),
             quiet: Some(cfg.quiet),
+            num_workers: Some(cfg.num_workers as u32),
         }
     }
 }

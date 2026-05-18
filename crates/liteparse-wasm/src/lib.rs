@@ -92,6 +92,7 @@ impl JsLiteParseConfig {
         if let Some(v) = self.quiet {
             cfg.quiet = v;
         }
+        cfg.num_workers = 1;
         Ok(cfg)
     }
 
@@ -186,8 +187,12 @@ impl OcrEngine for JsOcrEngine {
         width: u32,
         height: u32,
         options: &'b OcrOptions,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error>>> + '_>>
-    {
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
+                + '_,
+        >,
+    > {
         // Copy bytes into a JS Uint8Array up-front (must happen on the
         // current thread anyway in wasm).
         let arr = Uint8Array::new_with_length(image_data.len() as u32);

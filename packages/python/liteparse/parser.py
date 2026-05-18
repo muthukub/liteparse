@@ -73,6 +73,7 @@ class LiteParse:
         preserve_very_small_text: Optional[bool] = None,
         password: Optional[str] = None,
         quiet: Optional[bool] = None,
+        num_workers: Optional[int] = None,
     ):
         """
         Initialize LiteParse parser.
@@ -88,6 +89,7 @@ class LiteParse:
             preserve_very_small_text: Whether to preserve very small text
             password: Password for encrypted/protected documents
             quiet: Suppress progress output
+            num_workers: Number of concurrent OCR workers (default: CPU cores - 1)
         """
         kwargs = {}
         if ocr_enabled is not None:
@@ -110,6 +112,8 @@ class LiteParse:
             kwargs["password"] = password
         if quiet is not None:
             kwargs["quiet"] = quiet
+        if num_workers is not None:
+            kwargs["num_workers"] = num_workers
 
         self._native = _NativeLiteParse(**kwargs)
 

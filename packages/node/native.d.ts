@@ -65,8 +65,6 @@ export declare class LiteParse {
   parse(input: string | Buffer): Promise<JsParseResult>
   /** Take screenshots of document pages. Returns PNG image buffers. */
   screenshot(input: string, pageNumbers?: Array<number> | undefined | null): Array<JsScreenshotResult>
-  /** Format a parse result according to the configured output format. */
-  format(result: JsParseResult): string
   /** Get the current configuration. */
   get config(): JsLiteParseConfig
 }

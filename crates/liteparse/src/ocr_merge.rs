@@ -1,5 +1,7 @@
+use std::sync::Arc;
+
 use crate::error::LiteParseError;
-use crate::ocr::{OcrEngine, OcrOptions};
+use crate::ocr::{OcrEngine, OcrOptions, OcrResult};
 use crate::types::{Page, PdfInput, TextItem};
 use image::{ImageBuffer, Rgba};
 use pdfium::Library;
@@ -12,8 +14,9 @@ pub async fn ocr_and_merge_pages(
     pages: &mut [Page],
     pdf_path: &str,
     dpi: f32,
-    ocr_engine: &dyn OcrEngine,
+    ocr_engine: Arc<dyn OcrEngine>,
     ocr_language: &str,
+    num_workers: usize,
 ) -> Result<(), LiteParseError> {
     ocr_and_merge_pages_from_input(
         pages,
@@ -21,18 +24,22 @@ pub async fn ocr_and_merge_pages(
         dpi,
         ocr_engine,
         ocr_language,
+        num_workers,
     )
     .await
 }
 
 /// Run OCR on pages that need it and merge results into text_items.
 /// Accepts a `PdfInput` for either file path or in-memory bytes.
+///
+/// `num_workers` controls how many pages are OCR'd concurrently.
 pub async fn ocr_and_merge_pages_from_input(
     pages: &mut [Page],
     input: &PdfInput,
     dpi: f32,
-    ocr_engine: &dyn OcrEngine,
+    ocr_engine: Arc<dyn OcrEngine>,
     ocr_language: &str,
+    num_workers: usize,
 ) -> Result<(), LiteParseError> {
     // Phase 1: render all pages that need OCR. The pdfium `Document` holds raw
     // pointers that are not `Send`, so we must not hold it across an `.await`.
@@ -62,11 +69,6 @@ pub async fn ocr_and_merge_pages_from_input(
                 continue;
             }
 
-            eprintln!(
-                "[ocr] page {} needs OCR (text_length={}, has_images={})",
-                page.page_number, text_length, has_images
-            );
-
             let bitmap = page_obj.render(dpi)?;
             let width = bitmap.width() as u32;
             let height = bitmap.height() as u32;
@@ -90,27 +92,47 @@ pub async fn ocr_and_merge_pages_from_input(
         // `document` and `lib` are dropped here before any `.await`
     };
 
-    // Phase 2: run OCR (async) on rendered pages and merge results back.
+    // Phase 2: spawn OCR tasks onto the tokio runtime so they run on
+    // separate threads. A semaphore limits concurrency to `num_workers`.
+    let num_workers = num_workers.max(1);
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(num_workers));
+    let mut handles = Vec::with_capacity(rendered.len());
+
+    let handle = tokio::runtime::Handle::current();
+
     for r in rendered {
-        let RenderedPage {
-            idx,
-            rgb_bytes,
-            width,
-            height,
-        } = r;
-        let page = &mut pages[idx];
+        let engine = ocr_engine.clone();
+        let sem = semaphore.clone();
+        let language = ocr_language.to_string();
+        let page_number = pages[r.idx].page_number;
+        let rt_handle = handle.clone();
 
-        let options = OcrOptions {
-            language: ocr_language.to_string(),
-        };
+        handles.push((
+            r.idx,
+            page_number,
+            tokio::task::spawn_blocking(move || {
+                // Block this thread until a permit is available.
+                let _permit = rt_handle
+                    .block_on(sem.acquire_owned())
+                    .expect("semaphore closed");
+                let options = OcrOptions { language };
+                rt_handle.block_on(engine.recognize(&r.rgb_bytes, r.width, r.height, &options))
+            }),
+        ));
+    }
 
-        let ocr_results = match ocr_engine
-            .recognize(&rgb_bytes, width, height, &options)
-            .await
-        {
-            Ok(results) => results,
+    // Phase 3: collect results and merge into pages.
+    let scale_factor = 72.0 / dpi;
+
+    for (idx, page_number, handle) in handles {
+        let ocr_results: Vec<OcrResult> = match handle.await {
+            Ok(Ok(results)) => results,
+            Ok(Err(e)) => {
+                eprintln!("[ocr] failed for page {}: {}", page_number, e);
+                continue;
+            }
             Err(e) => {
-                eprintln!("[ocr] failed for page {}: {}", page.page_number, e);
+                eprintln!("[ocr] task panicked for page {}: {}", page_number, e);
                 continue;
             }
         };
@@ -119,12 +141,8 @@ pub async fn ocr_and_merge_pages_from_input(
             continue;
         }
 
-        // Scale OCR pixel coordinates to PDF points (72 DPI)
-        let scale_factor = 72.0 / dpi;
-
-        let mut added = 0;
+        let page = &mut pages[idx];
         for r in &ocr_results {
-            // Filter low confidence
             if r.confidence <= 0.1 {
                 continue;
             }
@@ -134,7 +152,6 @@ pub async fn ocr_and_merge_pages_from_input(
             let ocr_w = (r.bbox[2] - r.bbox[0]) * scale_factor;
             let ocr_h = (r.bbox[3] - r.bbox[1]) * scale_factor;
 
-            // Skip if overlaps with existing PDF text (2pt tolerance)
             if overlaps_existing_text(&page.text_items, ocr_x, ocr_y, ocr_w, ocr_h, 2.0) {
                 continue;
             }
@@ -155,14 +172,6 @@ pub async fn ocr_and_merge_pages_from_input(
                 confidence: Some((r.confidence * 1000.0).round() / 1000.0),
                 ..Default::default()
             });
-            added += 1;
-        }
-
-        if added > 0 {
-            eprintln!(
-                "[ocr] added {} text items from OCR on page {}",
-                added, page.page_number
-            );
         }
     }
 
