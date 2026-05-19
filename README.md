@@ -2,7 +2,13 @@
 
 [![CI](https://github.com/run-llama/liteparse/actions/workflows/ci.yml/badge.svg)](https://github.com/run-llama/liteparse/actions/workflows/ci.yml)
 |
+[![Crates.io version](https://img.shields.io/crates/v/liteparse.svg)](https://crates.io/crates/liteparse)
+|
 [![npm version](https://img.shields.io/npm/v/@llamaindex/liteparse.svg)](https://www.npmjs.com/package/@llamaindex/liteparse)
+|
+[![wasm version](https://img.shields.io/npm/v/@llamaindex/liteparse-wasm.svg)](https://www.npmjs.com/package/@llamaindex/liteparse-wasm)
+|
+[![PyPI version](https://img.shields.io/pypi/v/liteparse.svg)](https://pypi.org/project/liteparse/)
 |
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 |
@@ -22,47 +28,90 @@ hard stuff so your models see clean, structured data and markdown.
 
 ## Overview
 
-- **Fast Text Parsing**: Spatial text parsing using PDF.js
+- **Fast Text Parsing**: Spatial text parsing using PDFium
 - **Flexible OCR System**:
-  - **Built-in**: Tesseract.js (zero setup, works out of the box!)
+  - **Built-in**: Tesseract (zero setup, bundled with the library)
   - **HTTP Servers**: Plug in any OCR server (EasyOCR, PaddleOCR, custom)
   - **Standard API**: Simple, well-defined OCR API specification
 - **Screenshot Generation**: Generate high-quality page screenshots for LLM agents
 - **Multiple Output Formats**: JSON and Text
 - **Bounding Boxes**: Precise text positioning information
-- **Standalone Binary**: No cloud dependencies, runs entirely locally
+- **Multi-language**: Use from Rust, Node.js/TypeScript, Python, or the browser (WASM)
 - **Multi-platform**: Linux, macOS (Intel/ARM), Windows
 
 ## Installation
 
-### CLI Tool
+All versions (except WASM) ship with the same CLI and library API. Install the one that fits your environment:
 
-#### Option 1: Global Install (Recommended)
+<details>
+  <summary>Node.js / TypeScript</summary>
 
-Install globally via npm to use the `lit` command anywhere:
+Install via npm to use the `lit` CLI or the library API:
 
 ```bash
-npm i -g @llamaindex/liteparse
+npm i -g @llamaindex/liteparse   # CLI (global)
+npm i @llamaindex/liteparse      # Library (project dependency)
 ```
 
-Then use it:
+Parse your first document right away:
 
 ```bash
 lit parse document.pdf
-lit screenshot document.pdf
 ```
 
-#### Option 2: Install from Source
+Or use the library API in your Node.js or TypeScript project:
 
-You can clone the repo and install the CLI globally from source:
+```typescript
+import { LiteParse } from '@llamaindex/liteparse';
 
+const parser = new LiteParse({ ocrEnabled: true });
+
+const result = await parser.parse('document.pdf');
+console.log(result.text);
 ```
-git clone https://github.com/run-llama/liteparse.git
-cd liteparse
-npm run build
-npm pack
-npm install -g ./llamaindex-liteparse-*.tgz
+</details>
+
+<details>
+  <summary>Python</summary>
+
+Install via pip to use the `lit` CLI or the library API:
+
+```bash
+pip install liteparse
 ```
+
+Parse your first document right away:
+
+```bash
+lit parse document.pdf
+```
+
+Or use the library API in your Python project:
+
+```python
+from liteparse import LiteParse
+
+parser = LiteParse(ocr_enabled=True)
+result = parser.parse('document.pdf')
+print(result.text)
+```
+
+</details>
+
+<details>
+  <summary>Browser (WASM)</summary>
+
+You can install a trimmed-down version of LiteParse that runs entirely in the browser, with no server or cloud dependencies.
+
+```bash
+npm install @llamaindex/liteparse-wasm
+```
+
+It supports PDF parsing and custom OCR engines implemented in JavaScript.
+
+See the [WASM package README](packages/wasm/README.md) for usage details.
+
+</details>
 
 ### Agent Skill
 
@@ -74,7 +123,9 @@ npx skills add run-llama/llamaparse-agent-skills --skill liteparse
 
 Or copy-pasting the [`SKILL.md`](https://github.com/run-llama/llamaparse-agent-skills/blob/main/skills/liteparse/SKILL.md) file to your own skills setup.
 
-## Usage
+## CLI Usage
+
+The CLI is the same across all installations (`npm`, `pip`, or the Rust binary).
 
 ### Parse Files
 
@@ -83,7 +134,7 @@ Or copy-pasting the [`SKILL.md`](https://github.com/run-llama/llamaparse-agent-s
 lit parse document.pdf
 
 # Parse with specific format
-lit parse document.pdf --format json -o output.md
+lit parse document.pdf --format json -o output.json
 
 # Parse specific pages
 lit parse document.pdf --target-pages "1-5,10,15-20"
@@ -97,7 +148,7 @@ curl -sL https://example.com/report.pdf | lit parse -
 
 ### Batch Parsing
 
-You can also parse an entire directory of documents:
+Parse an entire directory of documents:
 
 ```bash
 lit batch-parse ./input-directory ./output-directory
@@ -116,36 +167,77 @@ lit screenshot document.pdf --target-pages "1,3,5" -o ./screenshots
 
 # Custom DPI
 lit screenshot document.pdf --dpi 300 -o ./screenshots
-
-# Screenshot page range
-lit screenshot document.pdf --target-pages "1-10" -o ./screenshots
 ```
 
-### Library Usage
+### CLI Reference
 
-Install as a dependency in your project:
+#### Parse Command
 
-```bash
-npm install @llamaindex/liteparse
-# or
-pnpm add @llamaindex/liteparse
 ```
+lit parse [OPTIONS] <file>
+
+Options:
+  -o, --output <file>          Output file path
+      --format <format>        Output format: json|text [default: text]
+      --no-ocr                 Disable OCR
+      --ocr-language <lang>    OCR language, Tesseract format [default: eng]
+      --ocr-server-url <url>   HTTP OCR server URL (uses Tesseract if not provided)
+      --tessdata-path <path>   Path to tessdata directory
+      --max-pages <n>          Max pages to parse [default: 1000]
+      --target-pages <pages>   Pages to parse (e.g., "1-5,10,15-20")
+      --dpi <dpi>              Rendering DPI [default: 150]
+      --preserve-small-text    Keep very small text
+      --password <password>    Password for encrypted documents
+      --num-workers <n>        Concurrent OCR workers [default: CPU cores - 1]
+  -q, --quiet                  Suppress progress output
+  -h, --help                   Print help
+```
+
+#### Batch Parse Command
+
+```
+lit batch-parse [OPTIONS] <input-dir> <output-dir>
+
+Options:
+      --format <format>        Output format: json|text [default: text]
+      --no-ocr                 Disable OCR
+      --ocr-language <lang>    OCR language [default: eng]
+      --ocr-server-url <url>   HTTP OCR server URL
+      --tessdata-path <path>   Path to tessdata directory
+      --max-pages <n>          Max pages per file [default: 1000]
+      --dpi <dpi>              Rendering DPI [default: 150]
+      --recursive              Recursively search input directory
+      --extension <ext>        Only process files with this extension (e.g., ".pdf")
+      --password <password>    Password for encrypted documents
+      --num-workers <n>        Concurrent OCR workers
+  -q, --quiet                  Suppress progress output
+  -h, --help                   Print help
+```
+
+#### Screenshot Command
+
+```
+lit screenshot [OPTIONS] <file>
+
+Options:
+  -o, --output-dir <dir>       Output directory [default: ./screenshots]
+      --target-pages <pages>   Pages to screenshot (e.g., "1,3,5" or "1-5")
+      --dpi <dpi>              Rendering DPI [default: 150]
+      --password <password>    Password for encrypted documents
+  -q, --quiet                  Suppress progress output
+  -h, --help                   Print help
+```
+
+## Library Usage
+
+### Buffer / Uint8Array Input
+
+All APIs that accept file paths also accept raw bytes, so you can parse documents from any source (e.g. HTTP responses, in-memory buffers) without writing to disk first.
+
+The WASM package only accepts `Uint8Array` input, while the Node.js and Python versions accept both file paths and bytes.
 
 ```typescript
 import { LiteParse } from '@llamaindex/liteparse';
-
-const parser = new LiteParse({ ocrEnabled: true });
-const result = await parser.parse('document.pdf');
-console.log(result.text);
-```
-
-#### Buffer / Uint8Array Input
-
-You can pass raw bytes directly instead of a file path, which is useful for remote files:
-
-```typescript
-import { LiteParse } from '@llamaindex/liteparse';
-import { readFile } from 'fs/promises';
 
 const parser = new LiteParse();
 
@@ -159,186 +251,39 @@ const buffer = Buffer.from(await response.arrayBuffer());
 const result2 = await parser.parse(buffer);
 ```
 
-Non-PDF buffers (images, Office documents) are written to a temp directory for format conversion. Screenshots also work with buffer input:
+#### Screenshots
 
 ```typescript
-const screenshots = await parser.screenshot(pdfBytes, [1, 2, 3]);
-```
-
-### Browser Usage
-
-LiteParse's core parsing engine (PDF.js text extraction, grid projection, OCR via Tesseract.js) can run in the browser. Since the library has Node-only dependencies (sharp, fs, child_process), you'll need a bundler like Vite to swap those out with browser stubs.
-
-#### Vite Configuration
-
-The key is a Vite plugin that redirects Node-only source files to browser-safe replacements, plus `resolve.alias` entries that stub out Node built-in modules:
-
-```typescript
-// vite.config.ts
-import { defineConfig, type Plugin } from "vite";
-import { resolve, dirname } from "node:path";
-
-// Node-only files → browser stubs (you write these)
-const FILE_REDIRECTS = [
-  { match: /\/engines\/pdf\/pdfium-renderer(\.js|\.ts)?$/, target: "stubs/pdfium-renderer.ts" },
-  { match: /\/engines\/pdf\/pdfjsImporter(\.js|\.ts)?$/,   target: "stubs/pdfjsImporter.ts" },
-  { match: /\/engines\/ocr\/http-simple(\.js|\.ts)?$/,     target: "stubs/http-simple.ts" },
-  { match: /\/conversion\/convertToPdf(\.js|\.ts)?$/,      target: "stubs/convertToPdf.ts" },
-  { match: /\/processing\/gridDebugLogger(\.js|\.ts)?$/,   target: "stubs/gridDebugLogger.ts" },
-  { match: /\/processing\/gridVisualizer(\.js|\.ts)?$/,    target: "stubs/gridVisualizer.ts" },
-];
-
-function liteparseNodeRedirects(): Plugin {
-  return {
-    name: "liteparse-node-redirects",
-    enforce: "pre",
-    async resolveId(source, importer) {
-      if (!importer) return null;
-      const abs = source.startsWith(".") ? resolve(dirname(importer), source) : source;
-      for (const { match, target } of FILE_REDIRECTS) {
-        if (match.test(abs) || match.test(source)) return resolve(target);
-      }
-      return null;
-    },
-  };
+const screenshots = await parser.screenshot('document.pdf', [1, 2, 3]);
+for (const s of screenshots) {
+  console.log(`Page ${s.pageNum}: ${s.width}x${s.height}`);
+  // s.imageBuffer contains PNG bytes
 }
-
-export default defineConfig({
-  plugins: [liteparseNodeRedirects()],
-  optimizeDeps: { include: ["tesseract.js"] },
-  resolve: {
-    alias: [
-      { find: "node:fs/promises", replacement: "stubs/empty.ts" },
-      { find: "node:fs",          replacement: "stubs/empty.ts" },
-      { find: "node:url",         replacement: "stubs/empty.ts" },
-      { find: "node:path",        replacement: "stubs/empty.ts" },
-      { find: "node:os",          replacement: "stubs/empty.ts" },
-      { find: "node:child_process", replacement: "stubs/empty.ts" },
-      { find: /^fs$/,             replacement: "stubs/empty.ts" },
-      { find: /^path$/,           replacement: "stubs/empty.ts" },
-      { find: /^os$/,             replacement: "stubs/empty.ts" },
-      { find: /^child_process$/,  replacement: "stubs/empty.ts" },
-      { find: "form-data",        replacement: "stubs/empty.ts" },
-      { find: "axios",            replacement: "stubs/empty.ts" },
-      { find: "file-type",        replacement: "stubs/file-type.ts" },
-    ],
-  },
-});
-```
-
-See [`scripts/browser-compat/`](scripts/browser-compat/) for a complete working example with all the stub files.
-
-#### What works in the browser
-
-- PDF parsing from `Uint8Array` input (use `file.arrayBuffer()` to get bytes from a `<input type="file">`)
-- OCR via Tesseract.js (runs in Web Workers, fetches language data from CDN on first use)
-- Text and JSON output formats
-
-#### What doesn't work
-
-- File path input (pass `Uint8Array` instead)
-- DOCX/XLSX/PPTX/image conversion (requires LibreOffice/ImageMagick)
-- HTTP OCR server backend
-- Screenshots (these use PDFium + sharp, which are native Node addons)
-
-### CLI Options
-
-#### Parse Command
-
-```
-$ lit parse --help
-Usage: lit parse [options] <file>
-
-Parse a document file (PDF, DOCX, XLSX, PPTX, images, etc.)
-
-Options:
-  -o, --output <file>     Output file path
-  --format <format>       Output format: json|text (default: "text")
-  --ocr-server-url <url>  HTTP OCR server URL (uses Tesseract if not provided)
-  --no-ocr                Disable OCR
-  --ocr-language <lang>   OCR language(s) (default: "en")
-  --num-workers <n>       Number of pages to OCR in parallel (default: CPU cores - 1)
-  --max-pages <n>         Max pages to parse (default: "10000")
-  --target-pages <pages>  Target pages (e.g., "1-5,10,15-20")
-  --dpi <dpi>             DPI for rendering (default: "150")
-  --no-precise-bbox       Disable precise bounding boxes
-  --preserve-small-text   Preserve very small text
-  --password <password>   Password for encrypted/protected documents
-  --config <file>         Config file (JSON)
-  -q, --quiet             Suppress progress output
-  -h, --help              display help for command
-```
-
-#### Batch Parse Command
-
-```
-$ lit batch-parse --help
-Usage: lit batch-parse [options] <input-dir> <output-dir>
-
-Parse multiple documents in batch mode (reuses PDF engine for efficiency)
-
-Options:
-  --format <format>       Output format: json|text (default: "text")
-  --ocr-server-url <url>  HTTP OCR server URL (uses Tesseract if not provided)
-  --no-ocr                Disable OCR
-  --ocr-language <lang>   OCR language(s) (default: "en")
-  --num-workers <n>       Number of pages to OCR in parallel (default: CPU cores - 1)
-  --max-pages <n>         Max pages to parse per file (default: "10000")
-  --dpi <dpi>             DPI for rendering (default: "150")
-  --no-precise-bbox       Disable precise bounding boxes
-  --recursive             Recursively search input directory
-  --extension <ext>       Only process files with this extension (e.g., ".pdf")
-  --password <password>   Password for encrypted/protected documents (applied to all files)
-  --config <file>         Config file (JSON)
-  -q, --quiet             Suppress progress output
-  -h, --help              display help for command
-```
-
-#### Screenshot Command
-
-```
-$ lit screenshot --help
-Usage: lit screenshot [options] <file>
-
-Generate screenshots of PDF pages
-
-Options:
-  -o, --output-dir <dir>  Output directory for screenshots (default: "./screenshots")
-  --target-pages <pages>  Page numbers to screenshot (e.g., "1,3,5" or "1-5")
-  --dpi <dpi>             DPI for rendering (default: "150")
-  --format <format>       Image format: png|jpg (default: "png")
-  --password <password>   Password for encrypted/protected documents
-  --config <file>         Config file (JSON)
-  -q, --quiet             Suppress progress output
-  -h, --help              display help for command
 ```
 
 ## OCR Setup
 
-### Default: Tesseract.js
+### Default: Tesseract
+
+Tesseract is bundled and works out of the box:
 
 ```bash
-# Tesseract is enabled by default
-lit parse document.pdf
-
-# Specify language
-lit parse document.pdf --ocr-language fra
-
-# Disable OCR
-lit parse document.pdf --no-ocr
+lit parse document.pdf                    # OCR enabled by default
+lit parse document.pdf --ocr-language fra # Specify language
+lit parse document.pdf --no-ocr           # Disable OCR
 ```
 
-By default, Tesseract.js downloads language data from the internet on first use. For offline or air-gapped environments, set the `TESSDATA_PREFIX` environment variable to a directory containing pre-downloaded `.traineddata` files:
+For offline or air-gapped environments, set `TESSDATA_PREFIX` to a directory containing pre-downloaded `.traineddata` files:
 
 ```bash
 export TESSDATA_PREFIX=/path/to/tessdata
 lit parse document.pdf --ocr-language eng
 ```
 
-You can also pass `tessdataPath` in the library config:
+Or pass the path directly:
 
-```typescript
-const parser = new LiteParse({ tessdataPath: '/path/to/tessdata' });
+```bash
+lit parse document.pdf --tessdata-path /path/to/tessdata
 ```
 
 ### Optional: HTTP OCR Servers
@@ -355,22 +300,18 @@ The API requires:
 - Accepts `file` and `language` parameters
 - Returns JSON: `{ results: [{ text, bbox: [x1,y1,x2,y2], confidence }] }`
 
-See the example servers in `ocr/easyocr/` and `ocr/paddleocr/` as templates.
-
-For the complete OCR API specification, see [`OCR_API_SPEC.md`](OCR_API_SPEC.md).
-
 ## Multi-Format Input Support
 
-LiteParse supports **automatic conversion** of various document formats to PDF before parsing. This makes it unique compared to other PDF-only parsing tools!
+LiteParse supports **automatic conversion** of various document formats to PDF before parsing.
 
 ### Supported Input Formats
 
 #### Office Documents (via LibreOffice)
-- **Word**: `.doc`, `.docx`, `.docm`, `.odt`, `.rtf`
-- **PowerPoint**: `.ppt`, `.pptx`, `.pptm`, `.odp`
-- **Spreadsheets**: `.xls`, `.xlsx`, `.xlsm`, `.ods`, `.csv`, `.tsv`
+- **Word**: `.doc`, `.docx`, `.docm`, `.odt`, `.rtf`, `.pages`
+- **PowerPoint**: `.ppt`, `.pptx`, `.pptm`, `.odp`, `.key`
+- **Spreadsheets**: `.xls`, `.xlsx`, `.xlsm`, `.ods`, `.csv`, `.tsv`, `.numbers`
 
-Just install the dependency and LiteParse will automatically convert these formats to PDF for parsing:
+Install LibreOffice for automatic conversion:
 
 ```bash
 # macOS
@@ -380,15 +321,15 @@ brew install --cask libreoffice
 apt-get install libreoffice
 
 # Windows
-choco install libreoffice-fresh # might require admin permissions
+choco install libreoffice-fresh
 ```
 
-> _For Windows, you might need to add the path to the directory containing LibreOffice CLI executable (generally `C:\Program Files\LibreOffice\program`) to the environment variables and re-start the machine._
+> _On Windows, you may need to add LibreOffice's program directory (usually `C:\Program Files\LibreOffice\program`) to your PATH._
 
 #### Images (via ImageMagick)
 - **Formats**: `.jpg`, `.jpeg`, `.png`, `.gif`, `.bmp`, `.tiff`, `.webp`, `.svg`
 
-Just install ImageMagick and LiteParse will convert images to PDF for parsing (with OCR):
+Install ImageMagick for image-to-PDF conversion:
 
 ```bash
 # macOS
@@ -398,73 +339,50 @@ brew install imagemagick
 apt-get install imagemagick
 
 # Windows
-choco install imagemagick.app # might require admin permissions
+choco install imagemagick.app
 ```
 
 ## Environment Variables
 
 | Variable | Description |
 |----------|-------------|
-| `TESSDATA_PREFIX` | Path to a directory containing Tesseract `.traineddata` files. Used for offline/air-gapped environments where Tesseract.js cannot download language data from the internet. |
-| `LITEPARSE_TMPDIR` | Override the temp directory used for format conversion and intermediate files. Defaults to the OS temp directory (`os.tmpdir()`). Useful in containerized or read-only filesystem environments. |
-
-## Configuration
-
-You can configure parsing options via CLI flags or a JSON config file. The config file allows you to set sensible defaults and override as needed.
-
-### Config File Example
-
-Create a `liteparse.config.json` file:
-
-```json
-{
-  "ocrLanguage": "en",
-  "ocrEnabled": true,
-  "maxPages": 1000,
-  "dpi": 150,
-  "outputFormat": "json",
-  "preciseBoundingBox": true,
-  "preserveVerySmallText": false,
-  "password": "optional_password"
-}
-```
-
-For HTTP OCR servers, just add `ocrServerUrl`:
-
-```json
-{
-  "ocrServerUrl": "http://localhost:8828/ocr",
-  "ocrLanguage": "en",
-  "outputFormat": "json"
-}
-```
-
-Use with:
-
-```bash
-lit parse document.pdf --config liteparse.config.json
-```
+| `TESSDATA_PREFIX` | Path to a directory containing Tesseract `.traineddata` files. Used for offline/air-gapped environments. |
 
 ## Development
 
-We provide a fairly rich `AGENTS.md`/`CLAUDE.md` that we recommend using to help with development + coding agents.
+The project is a Rust workspace with the core library and language-specific binding crates.
+
+```
+crates/
+├── liteparse/          # Core library + CLI binary
+├── liteparse-napi/     # Node.js bindings (napi-rs)
+├── liteparse-python/   # Python bindings (PyO3)
+├── liteparse-wasm/     # WASM bindings (wasm-bindgen)
+├── pdfium/             # PDFium Rust wrapper
+└── pdfium-sys/         # PDFium FFI bindings
+packages/
+├── node/               # npm package (TS wrapper + native binary)
+├── python/             # PyPI package (Python wrapper + native binary)
+└── wasm/               # WASM npm package
+```
+
+### Building
 
 ```bash
-# Install dependencies
-npm install
+# Build the CLI
+cargo build --release -p liteparse
 
-# Build TypeScript (Linux/macOs)
-npm run build
+# Build Node.js bindings
+cd packages/node && npm run build
 
-# Build Typescript (Windows)
-npm run build:windows
+# Build Python bindings
+cd packages/python && maturin develop --release
 
-# Watch mode
-npm run dev
-
-# Test parsing
-npm test
+# Build WASM
+cd packages/wasm && npm run build
 ```
+
+We provide a fairly rich `AGENTS.md`/`CLAUDE.md` that we recommend using to help with development + coding agents.
 
 ## License
 
@@ -474,8 +392,10 @@ Apache 2.0
 
 Built on top of:
 
-- [PDF.js](https://github.com/mozilla/pdf.js) - PDF parsing engine
-- [Tesseract.js](https://github.com/naptha/tesseract.js) - In-process OCR engine
+- [PDFium](https://pdfium.googlesource.com/pdfium/) - PDF rendering and text extraction
+- [Tesseract](https://github.com/tesseract-ocr/tesseract) - OCR engine (via tesseract-rs)
 - [EasyOCR](https://github.com/JaidedAI/EasyOCR) - HTTP OCR server (optional)
 - [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) - HTTP OCR server (optional)
-- [Sharp](https://github.com/lovell/sharp) - Image processing
+- [napi-rs](https://napi.rs/) - Node.js native bindings
+- [PyO3](https://pyo3.rs/) - Python native bindings
+- [wasm-bindgen](https://github.com/wasm-bindgen/wasm-bindgen) - WebAssembly bindings

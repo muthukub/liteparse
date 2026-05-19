@@ -1,122 +1,86 @@
 # LiteParse Python
 
-Python wrapper for [LiteParse](https://github.com/run-llama/liteparse) - fast, lightweight document parsing with optional OCR.
-
-> **Important:** This package is a Python wrapper around the LiteParse Node.js CLI.
-> You must have **Node.js** (>= 18) installed on your system. The CLI will be auto-installed
-> via npm on first use if not already present, or you can install it manually beforehand.
+Python bindings for [LiteParse](https://github.com/run-llama/liteparse) — fast, lightweight PDF and document parsing with spatial text extraction.
 
 ## Installation
-
-### Step 1: Install Node.js
-
-LiteParse requires Node.js (>= 18). Install it from [nodejs.org](https://nodejs.org/) or via your package manager.
-
-### Step 2: Install the LiteParse CLI
-
-```bash
-npm install -g @llamaindex/liteparse
-```
-
-### Step 3: Install the Python package
 
 ```bash
 pip install liteparse
 ```
 
-> **Note:** If you skip Step 2, the Python package will attempt to auto-install the CLI
-> via `npm install -g @llamaindex/liteparse` on first use (requires npm in your PATH).
+This also installs the `lit` CLI command.
 
 ## Quick Start
 
 ```python
 from liteparse import LiteParse
 
-# Create parser
 parser = LiteParse()
-
-# Parse a document
 result = parser.parse("document.pdf")
 print(result.text)
 
 # Access structured data
 for page in result.pages:
-    print(f"Page {page.pageNum}: {len(page.textItems)} text items")
+    print(f"Page {page.page_num}: {len(page.text_items)} text items")
 ```
 
 ## Configuration
 
-All parsing options are passed per-call to `parse()`:
+All options are passed to the constructor:
 
 ```python
-from liteparse import LiteParse
-
-parser = LiteParse()
-
-result = parser.parse(
-    "document.pdf",
-    ocr_enabled=False,
-    max_pages=10,
-    dpi=150,
-    preserve_very_small_text=True,
+parser = LiteParse(
+    ocr_enabled=True,              # Enable OCR (default: True)
+    ocr_language="eng",            # Tesseract language code
+    ocr_server_url=None,           # HTTP OCR server URL (optional)
+    tessdata_path=None,            # Path to tessdata directory (optional)
+    max_pages=1000,                # Max pages to parse
+    target_pages="1-5,10",         # Specific pages (optional)
+    dpi=150,                       # Rendering DPI
+    preserve_very_small_text=False, # Keep tiny text
+    password=None,                 # Password for protected documents
+    quiet=False,                   # Suppress progress output
+    num_workers=4,                 # Concurrent OCR workers
 )
-print(result.text)
 ```
 
-## Parsing from bytes
+## Parsing from Bytes
 
-If you already have file contents in memory (e.g. from a web upload), pass them directly:
+Pass raw PDF bytes directly — useful for web uploads or downloaded files:
 
 ```python
 with open("document.pdf", "rb") as f:
-    pdf_bytes = f.read()
-
-result = parser.parse(pdf_bytes)
+    result = parser.parse(f.read())
 print(result.text)
 ```
 
-## Batch Processing
+## Screenshots
 
-For parsing multiple files, batch mode is significantly faster as it reuses the PDF engine:
+Generate PNG screenshots of document pages:
 
 ```python
-from liteparse import LiteParse
-
-parser = LiteParse()
-
-# Parse all documents in a directory
-result = parser.batch_parse(
-    input_dir="./documents",
-    output_dir="./output",
-    ocr_enabled=False,
-    recursive=True,              # Include subdirectories
-    extension_filter=".pdf",     # Only PDF files
-)
-
-print(f"Output written to: {result.output_dir}")
+screenshots = parser.screenshot("document.pdf", page_numbers=[1, 2, 3])
+for s in screenshots:
+    print(f"Page {s.page_num}: {s.width}x{s.height}")
+    with open(f"page_{s.page_num}.png", "wb") as f:
+        f.write(s.image_bytes)
 ```
 
 ## Supported Formats
 
 - PDF (`.pdf`)
-- Microsoft Office (`.docx`, `.xlsx`, `.pptx`, etc.) - requires LibreOffice
-- OpenDocument (`.odt`, `.ods`, `.odp`) - requires LibreOffice
-- Images (`.png`, `.jpg`, `.tiff`, etc.) - requires ImageMagick
+- Microsoft Office (`.docx`, `.xlsx`, `.pptx`, etc.) — requires LibreOffice
+- OpenDocument (`.odt`, `.ods`, `.odp`) — requires LibreOffice
+- Images (`.png`, `.jpg`, `.tiff`, etc.) — requires ImageMagick
 - And more!
 
-## Performance Tips
+## CLI
 
-1. **Disable OCR** if your documents have selectable text:
-   ```python
-   result = parser.parse("doc.pdf", ocr_enabled=False)
-   ```
+The Python package includes the `lit` CLI:
 
-2. **Use batch mode** for multiple files to avoid cold-start overhead:
-   ```python
-   parser.batch_parse("./input", "./output")
-   ```
-
-3. **Limit pages** if you only need specific pages:
-   ```python
-   result = parser.parse("doc.pdf", target_pages="1-5")
-   ```
+```bash
+lit parse document.pdf
+lit parse document.pdf --format json -o output.json
+lit screenshot document.pdf -o ./screenshots
+lit batch-parse ./input ./output
+```
