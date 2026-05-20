@@ -49,7 +49,7 @@ jobs:
             node-arch: linux-x64-gnu
             pdfium-dylib: libpdfium.so
 
-          - os: ubuntu-latest-arm
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             node-arch: linux-arm64-gnu
             pdfium-dylib: libpdfium.so
