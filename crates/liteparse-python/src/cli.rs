@@ -1,10 +1,8 @@
 use clap::{Args, Parser, Subcommand};
 use liteparse::config::{LiteParseConfig, OutputFormat};
 use liteparse::conversion;
-use liteparse::extract;
 use liteparse::output::{json, text};
 use liteparse::parser::LiteParse;
-use liteparse::render;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -25,10 +23,6 @@ enum Commands {
     Screenshot(ScreenshotCommand),
     /// Parse multiple documents in batch mode
     BatchParse(BatchParseCommand),
-    /// Extract raw text items from a PDF file (no grid projection) [dev tool]
-    Extract(ExtractCommand),
-    /// Extract embedded image bounding boxes from a page [dev tool]
-    ImageBounds(ExtractCommand),
 }
 
 #[derive(Args, Debug)]
@@ -105,14 +99,6 @@ struct BatchParseCommand {
     quiet: bool,
     #[arg(long)]
     num_workers: Option<usize>,
-}
-
-#[derive(Args, Debug)]
-struct ExtractCommand {
-    #[arg(long)]
-    pdf_path: String,
-    #[arg(long)]
-    page_num: Option<u32>,
 }
 
 fn parse_output_format(s: &str) -> Result<OutputFormat, String> {
@@ -301,13 +287,6 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             if errors > 0 {
                 std::process::exit(1);
             }
-        }
-
-        Commands::Extract(cmd) => {
-            extract::extract(&cmd.pdf_path, cmd.page_num)?;
-        }
-        Commands::ImageBounds(cmd) => {
-            render::image_bounds(&cmd.pdf_path, cmd.page_num)?;
         }
     }
 

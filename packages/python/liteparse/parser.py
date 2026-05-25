@@ -7,6 +7,7 @@ from liteparse._liteparse import LiteParse as _NativeLiteParse
 from liteparse._liteparse import search_items as _native_search_items
 
 from .types import (
+    LiteParseConfig,
     ParsedPage,
     ParseError,
     ParseResult,
@@ -70,7 +71,7 @@ class LiteParse:
         max_pages: Optional[int] = None,
         target_pages: Optional[str] = None,
         dpi: Optional[float] = None,
-
+        output_format: Optional[str] = None,
         preserve_very_small_text: Optional[bool] = None,
         password: Optional[str] = None,
         quiet: Optional[bool] = None,
@@ -87,6 +88,7 @@ class LiteParse:
             max_pages: Maximum number of pages to parse
             target_pages: Specific pages to parse (e.g., "1-5,10,15-20")
             dpi: DPI for rendering (affects OCR quality)
+            output_format: Output format: "json" or "text" (default: "json")
             preserve_very_small_text: Whether to preserve very small text
             password: Password for encrypted/protected documents
             quiet: Suppress progress output
@@ -107,6 +109,8 @@ class LiteParse:
             kwargs["target_pages"] = target_pages
         if dpi is not None:
             kwargs["dpi"] = dpi
+        if output_format is not None:
+            kwargs["output_format"] = output_format
         if preserve_very_small_text is not None:
             kwargs["preserve_very_small_text"] = preserve_very_small_text
         if password is not None:
@@ -194,6 +198,24 @@ class LiteParse:
             ]
         except Exception as e:
             raise ParseError(str(e)) from e
+
+    def get_config(self) -> LiteParseConfig:
+        """Return the resolved configuration."""
+        cfg = self._native.config
+        return LiteParseConfig(
+            ocr_language=cfg.ocr_language,
+            ocr_enabled=cfg.ocr_enabled,
+            ocr_server_url=cfg.ocr_server_url,
+            tessdata_path=cfg.tessdata_path,
+            max_pages=cfg.max_pages,
+            target_pages=cfg.target_pages,
+            dpi=cfg.dpi,
+            output_format=cfg.output_format,
+            preserve_very_small_text=cfg.preserve_very_small_text,
+            password=cfg.password,
+            quiet=cfg.quiet,
+            num_workers=cfg.num_workers,
+        )
 
     def __repr__(self) -> str:
         return "LiteParse()"

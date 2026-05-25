@@ -2,7 +2,7 @@ use crate::types::ParsedPage;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
-pub struct JsonTextItem {
+pub(crate) struct JsonTextItem {
     pub text: String,
     pub x: f32,
     pub y: f32,
@@ -17,7 +17,7 @@ pub struct JsonTextItem {
 }
 
 #[derive(Debug, Serialize)]
-pub struct JsonPage {
+pub(crate) struct JsonPage {
     pub page: usize,
     pub width: f32,
     pub height: f32,
@@ -26,12 +26,12 @@ pub struct JsonPage {
 }
 
 #[derive(Debug, Serialize)]
-pub struct ParseResultJson {
+pub(crate) struct ParseResultJson {
     pub pages: Vec<JsonPage>,
 }
 
 /// Build structured JSON output from parsed pages.
-pub fn build_json(pages: &[ParsedPage]) -> ParseResultJson {
+pub(crate) fn build_json(pages: &[ParsedPage]) -> ParseResultJson {
     ParseResultJson {
         pages: pages
             .iter()

@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use crate::error::LiteParseError;
-use crate::extract::load_document_from_input;
 use crate::ocr::{OcrEngine, OcrOptions, OcrResult};
-use crate::types::{Page, PdfInput, TextItem};
+use crate::types::{Page, TextItem};
 use image::{ImageBuffer, Rgba};
 use pdfium::Document;
 
@@ -13,48 +12,6 @@ pub(crate) struct RenderedPage {
     pub rgb_bytes: Vec<u8>,
     pub width: u32,
     pub height: u32,
-}
-
-/// Run OCR on pages that need it and merge results into text_items.
-///
-/// OCR is triggered when a page has fewer than 100 characters of native text
-/// or has embedded images.
-pub async fn ocr_and_merge_pages(
-    pages: &mut [Page],
-    pdf_path: &str,
-    dpi: f32,
-    ocr_engine: Arc<dyn OcrEngine>,
-    ocr_language: &str,
-    num_workers: usize,
-) -> Result<(), LiteParseError> {
-    ocr_and_merge_pages_from_input(
-        pages,
-        &PdfInput::Path(pdf_path.to_string()),
-        dpi,
-        ocr_engine,
-        ocr_language,
-        num_workers,
-        None,
-    )
-    .await
-}
-
-/// Run OCR on pages that need it and merge results into text_items.
-/// Accepts a `PdfInput` for either file path or in-memory bytes.
-///
-/// `num_workers` controls how many pages are OCR'd concurrently.
-pub async fn ocr_and_merge_pages_from_input(
-    pages: &mut [Page],
-    input: &PdfInput,
-    dpi: f32,
-    ocr_engine: Arc<dyn OcrEngine>,
-    ocr_language: &str,
-    num_workers: usize,
-    password: Option<&str>,
-) -> Result<(), LiteParseError> {
-    let document = load_document_from_input(input, password)?;
-    let rendered = render_pages_for_ocr(&document, pages, dpi)?;
-    ocr_and_merge_rendered(pages, rendered, dpi, ocr_engine, ocr_language, num_workers).await
 }
 
 /// Render pages that need OCR from an already-open document.

@@ -56,6 +56,23 @@ class ScreenshotResult:
     image_bytes: bytes
 
 
+@dataclass
+class LiteParseConfig:
+    """Resolved parser configuration."""
+    ocr_language: str
+    ocr_enabled: bool
+    ocr_server_url: Optional[str]
+    tessdata_path: Optional[str]
+    max_pages: int
+    target_pages: Optional[str]
+    dpi: float
+    output_format: str
+    preserve_very_small_text: bool
+    password: Optional[str]
+    quiet: bool
+    num_workers: int
+
+
 class ParseError(Exception):
     """Exception raised when parsing fails."""
     pass

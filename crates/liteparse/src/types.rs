@@ -1,12 +1,5 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::HashMap;
-
-#[doc(hidden)]
-#[derive(Debug, Serialize, Deserialize)]
-pub enum InputType {
-    FilePath(String),
-    Buffer(Vec<u8>),
-}
 
 #[doc(hidden)]
 #[derive(Debug, Clone)]
@@ -129,17 +122,6 @@ mod tests {
             font_name: Some("Arial".into()),
             font_size: Some(12.0),
             ..Default::default()
-        }
-    }
-
-    #[test]
-    fn input_type_roundtrip() {
-        let v = InputType::FilePath("/tmp/x.pdf".into());
-        let s = serde_json::to_string(&v).unwrap();
-        let back: InputType = serde_json::from_str(&s).unwrap();
-        match back {
-            InputType::FilePath(p) => assert_eq!(p, "/tmp/x.pdf"),
-            _ => panic!("wrong variant"),
         }
     }
 

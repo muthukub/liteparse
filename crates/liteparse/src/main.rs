@@ -26,8 +26,10 @@ enum Commands {
     /// Parse multiple documents in batch mode
     BatchParse(BatchParseCommand),
     /// Extract raw text items from a PDF file (no grid projection) [dev tool]
+    #[command(hide = true)]
     Extract(ExtractCommand),
     /// Extract embedded image bounding boxes from a page [dev tool]
+    #[command(hide = true)]
     ImageBounds(ExtractCommand),
 }
 

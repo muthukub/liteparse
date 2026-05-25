@@ -184,6 +184,71 @@ impl PyScreenshotResult {
 }
 
 // ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+struct PyLiteParseConfig {
+    #[pyo3(get)]
+    ocr_language: String,
+    #[pyo3(get)]
+    ocr_enabled: bool,
+    #[pyo3(get)]
+    ocr_server_url: Option<String>,
+    #[pyo3(get)]
+    tessdata_path: Option<String>,
+    #[pyo3(get)]
+    max_pages: usize,
+    #[pyo3(get)]
+    target_pages: Option<String>,
+    #[pyo3(get)]
+    dpi: f32,
+    #[pyo3(get)]
+    output_format: String,
+    #[pyo3(get)]
+    preserve_very_small_text: bool,
+    #[pyo3(get)]
+    password: Option<String>,
+    #[pyo3(get)]
+    quiet: bool,
+    #[pyo3(get)]
+    num_workers: usize,
+}
+
+#[pymethods]
+impl PyLiteParseConfig {
+    fn __repr__(&self) -> String {
+        format!(
+            "LiteParseConfig(ocr_enabled={}, dpi={}, max_pages={})",
+            self.ocr_enabled, self.dpi, self.max_pages
+        )
+    }
+}
+
+impl PyLiteParseConfig {
+    fn from_rust(cfg: &LiteParseConfig) -> Self {
+        Self {
+            ocr_language: cfg.ocr_language.clone(),
+            ocr_enabled: cfg.ocr_enabled,
+            ocr_server_url: cfg.ocr_server_url.clone(),
+            tessdata_path: cfg.tessdata_path.clone(),
+            max_pages: cfg.max_pages,
+            target_pages: cfg.target_pages.clone(),
+            dpi: cfg.dpi,
+            output_format: match cfg.output_format {
+                OutputFormat::Json => "json".to_string(),
+                OutputFormat::Text => "text".to_string(),
+            },
+            preserve_very_small_text: cfg.preserve_very_small_text,
+            password: cfg.password.clone(),
+            quiet: cfg.quiet,
+            num_workers: cfg.num_workers,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main LiteParse class
 // ---------------------------------------------------------------------------
 
@@ -325,6 +390,12 @@ impl LiteParse {
         })
     }
 
+    /// Get the resolved configuration.
+    #[getter]
+    fn config(&self) -> PyLiteParseConfig {
+        PyLiteParseConfig::from_rust(&self.config)
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "LiteParse(ocr_enabled={}, dpi={}, max_pages={})",
@@ -361,6 +432,7 @@ fn run_cli(args: Vec<String>) -> PyResult<()> {
 #[pymodule]
 fn _liteparse(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LiteParse>()?;
+    m.add_class::<PyLiteParseConfig>()?;
     m.add_class::<PyParseResult>()?;
     m.add_class::<PyParsedPage>()?;
     m.add_class::<PyTextItem>()?;

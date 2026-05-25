@@ -14,35 +14,6 @@ pub(crate) fn load_document_from_input(
     }
 }
 
-/// Extract pages from a PDF file and return them as structured data.
-pub fn extract_pages(
-    pdf_path: &str,
-    page_num: Option<u32>,
-) -> Result<Vec<LitePage>, LiteParseError> {
-    let target_pages: Option<Vec<u32>> = page_num.map(|p| vec![p]);
-    extract_pages_from_input(
-        &PdfInput::Path(pdf_path.to_string()),
-        target_pages.as_deref(),
-        usize::MAX,
-        None,
-    )
-}
-
-/// Extract pages with filtering by target page list and max pages, with optional password.
-pub fn extract_pages_filtered(
-    pdf_path: &str,
-    target_pages: Option<&[u32]>,
-    max_pages: usize,
-    password: Option<&str>,
-) -> Result<Vec<LitePage>, LiteParseError> {
-    extract_pages_from_input(
-        &PdfInput::Path(pdf_path.to_string()),
-        target_pages,
-        max_pages,
-        password,
-    )
-}
-
 /// Extract pages from a `PdfInput` (file path or bytes) with filtering.
 pub fn extract_pages_from_input(
     input: &PdfInput,
@@ -99,7 +70,13 @@ pub(crate) fn extract_pages_from_document(
 
 /// Extract raw text items and print each page as a JSON-line object to stdout.
 pub fn extract(pdf_path: &str, page_num: Option<u32>) -> Result<(), LiteParseError> {
-    let pages = extract_pages(pdf_path, page_num)?;
+    let target_pages: Option<Vec<u32>> = page_num.map(|p| vec![p]);
+    let pages = extract_pages_from_input(
+        &PdfInput::Path(pdf_path.to_string()),
+        target_pages.as_deref(),
+        usize::MAX,
+        None,
+    )?;
     for page in &pages {
         println!("{}", serde_json::to_string(page)?);
     }
@@ -990,14 +967,13 @@ mod tests {
     }
 
     #[test]
-    fn extract_pages_missing_file_errors() {
-        let res = extract_pages("/nonexistent/path/does-not-exist.pdf", None);
-        assert!(res.is_err());
-    }
-
-    #[test]
-    fn extract_pages_filtered_missing_file_errors() {
-        let res = extract_pages_filtered("/nonexistent/path/does-not-exist.pdf", None, 10, None);
+    fn extract_pages_from_input_missing_file_errors() {
+        let res = extract_pages_from_input(
+            &PdfInput::Path("/nonexistent/path/does-not-exist.pdf".to_string()),
+            None,
+            usize::MAX,
+            None,
+        );
         assert!(res.is_err());
     }
 }

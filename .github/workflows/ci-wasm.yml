@@ -7,6 +7,7 @@ on:
       - 'crates/**'
       - 'packages/wasm/**'
       - 'scripts/browser-compat/**'
+      - 'scripts/edge-compat/**'
       - '.github/workflows/ci-wasm.yml'
   pull_request:
     branches: [main]
@@ -14,6 +15,7 @@ on:
       - 'crates/**'
       - 'packages/wasm/**'
       - 'scripts/browser-compat/**'
+      - 'scripts/edge-compat/**'
       - '.github/workflows/ci-wasm.yml'
 
 env:
@@ -91,3 +93,27 @@ jobs:
 
       - name: Run browser parse test
         run: node scripts/browser-compat/wasm-test.mjs
+
+  edge-test:
+    runs-on: ubuntu-latest
+    needs: build
+    name: Edge runtime PDF parse test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-pkg
+          path: packages/wasm/pkg/
+
+      - name: Install Miniflare
+        run: npm install miniflare@latest
+
+      - name: Run edge runtime parse test
+        run: node scripts/edge-compat/wasm-test.mjs

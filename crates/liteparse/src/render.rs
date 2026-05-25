@@ -93,24 +93,6 @@ pub fn screenshot(
     Ok(())
 }
 
-/// Render a single page and write raw PNG bytes to stdout.
-pub fn screenshot_to_stdout(
-    pdf_path: &str,
-    page_num: u32,
-    dpi: f32,
-    password: Option<&str>,
-) -> Result<(), LiteParseError> {
-    let input = PdfInput::Path(pdf_path.to_string());
-    let pages = render_pages_to_png(&input, Some(&[page_num]), dpi, password)?;
-    let page = pages
-        .into_iter()
-        .next()
-        .ok_or_else(|| LiteParseError::Other("no page rendered".into()))?;
-
-    std::io::Write::write_all(&mut std::io::stdout().lock(), &page.png_bytes)?;
-    Ok(())
-}
-
 #[derive(Debug, Serialize)]
 struct ImageBoundsOutput {
     x: f32,
