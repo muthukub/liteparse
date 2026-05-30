@@ -210,48 +210,6 @@
       word-break: normal;
     }
 
-    #pdf-view {
-      background: var(--black);
-      border-radius: 10px;
-      padding: 1.25rem;
-      max-height: 700px;
-      overflow: auto;
-      display: none;
-    }
-
-    #pdf-view.visible { display: block; }
-
-    .pdf-page {
-      position: relative;
-      margin: 0 auto 1rem auto;
-      background: white;
-      box-shadow: 0 2px 12px rgba(0,0,0,0.4);
-      line-height: 0;
-    }
-
-    .pdf-page:last-child { margin-bottom: 0; }
-
-    .pdf-page canvas { display: block; }
-
-    .pdf-page svg {
-      position: absolute;
-      inset: 0;
-      width: 100%;
-      height: 100%;
-      pointer-events: none;
-    }
-
-    .pdf-page svg rect {
-      fill: rgba(75, 114, 254, 0.12);
-      stroke: var(--mid-purple);
-      stroke-width: 1;
-    }
-
-    .pdf-page svg rect.ocr {
-      fill: rgba(255, 141, 242, 0.15);
-      stroke: var(--vibrant-pink);
-    }
-
     /* Stats bar */
     .stats {
       display: flex;
@@ -409,14 +367,12 @@
       <div class="controls">
         <label for="format-select">Output:</label>
         <select id="format-select">
-          <option value="pdf">PDF with bounding boxes</option>
           <option value="text">Plain Text</option>
           <option value="json">JSON (with bounding boxes)</option>
         </select>
         <div class="spacer"></div>
         <button id="copy-btn">Copy</button>
       </div>
-      <div id="pdf-view"></div>
       <pre id="output"></pre>
       <div class="stats" id="stats"></div>
     </div>
@@ -451,7 +407,6 @@ console.<span class="fn">log</span>(<span class="const">result</span>.pages[<spa
   <script type="module">
     const status = document.getElementById("status");
     const output = document.getElementById("output");
-    const pdfView = document.getElementById("pdf-view");
     const outputContainer = document.getElementById("output-container");
     const statsEl = document.getElementById("stats");
     const dropZone = document.getElementById("drop-zone");
@@ -460,15 +415,6 @@ console.<span class="fn">log</span>(<span class="const">result</span>.pages[<spa
     const copyBtn = document.getElementById("copy-btn");
 
     let lastResult = null;
-    let lastBytes = null;
-
-    // --- Load pdf.js from CDN ---
-    const PDFJS_VERSION = "4.7.76";
-    const pdfjs = await import(
-      `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}/build/pdf.min.mjs`
-    );
-    pdfjs.GlobalWorkerOptions.workerSrc =
-      `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}/build/pdf.worker.min.mjs`;
 
     function setStatus(msg, type) {
       status.textContent = msg;
@@ -478,16 +424,14 @@ console.<span class="fn">log</span>(<span class="const">result</span>.pages[<spa
     // --- Load WASM from CDN ---
     setStatus("Loading WASM module...", "loading");
 
-    // Local build: from `packages/wasm/` run `npm run build` (wasm-pack +
-    // patch-wasi-imports). Then serve the repo root (e.g. `python3 -m http.server`)
-    // and open /wasm-demo-site/index.html. The patch step is required — running
-    // wasm-pack directly leaves unresolved `env` imports.
-    const WASM_BASE = "../packages/wasm/pkg";
-
     let LiteParse;
     try {
-      const mod = await import(`${WASM_BASE}/liteparse_wasm.js`);
-      await mod.default(`${WASM_BASE}/liteparse_wasm_bg.wasm`);
+      const mod = await import(
+        "https://cdn.jsdelivr.net/npm/@llamaindex/liteparse-wasm@2/pkg/liteparse_wasm.js"
+      );
+      await mod.default(
+        "https://cdn.jsdelivr.net/npm/@llamaindex/liteparse-wasm@2/pkg/liteparse_wasm_bg.wasm"
+      );
       LiteParse = mod.LiteParse;
       setStatus("Ready. Drop a PDF to parse.", "success");
     } catch (err) {
@@ -543,7 +487,6 @@ console.<span class="fn">log</span>(<span class="const">result</span>.pages[<spa
         const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
 
         lastResult = result;
-        lastBytes = bytes;
         setStatus(`Parsed ${result.pages.length} page(s) in ${elapsed}s`, "success");
         renderOutput();
 
@@ -562,91 +505,12 @@ console.<span class="fn">log</span>(<span class="const">result</span>.pages[<spa
     }
 
     // --- Render output ---
-    async function renderOutput() {
+    function renderOutput() {
       if (!lastResult) return;
-      const mode = formatSelect.value;
-
-      if (mode === "pdf") {
-        output.style.display = "none";
-        pdfView.classList.add("visible");
-        copyBtn.style.display = "none";
-        await renderPdfWithBoxes();
-        return;
-      }
-
-      pdfView.classList.remove("visible");
-      output.style.display = "";
-      copyBtn.style.display = "";
-
-      if (mode === "text") {
+      if (formatSelect.value === "text") {
         output.textContent = lastResult.text;
       } else {
         output.textContent = JSON.stringify(lastResult, null, 2);
-      }
-    }
-
-    let renderToken = 0;
-    async function renderPdfWithBoxes() {
-      const token = ++renderToken;
-      pdfView.innerHTML = '<div style="color:#888;font-family:var(--font-mono);font-size:0.8rem;">Rendering PDF...</div>';
-
-      const pdf = await pdfjs.getDocument({ data: lastBytes.slice() }).promise;
-      if (token !== renderToken) return;
-
-      pdfView.innerHTML = "";
-
-      const containerWidth = pdfView.clientWidth - 40; // padding
-      const maxRenderWidth = Math.min(containerWidth, 900);
-
-      for (let i = 0; i < lastResult.pages.length; i++) {
-        const pageData = lastResult.pages[i];
-        const pdfPage = await pdf.getPage(pageData.pageNum);
-        if (token !== renderToken) return;
-
-        const baseViewport = pdfPage.getViewport({ scale: 1 });
-        const scale = maxRenderWidth / baseViewport.width;
-        const viewport = pdfPage.getViewport({ scale });
-
-        const pageDiv = document.createElement("div");
-        pageDiv.className = "pdf-page";
-        pageDiv.style.width = viewport.width + "px";
-        pageDiv.style.height = viewport.height + "px";
-
-        const canvas = document.createElement("canvas");
-        const dpr = window.devicePixelRatio || 1;
-        canvas.width = Math.floor(viewport.width * dpr);
-        canvas.height = Math.floor(viewport.height * dpr);
-        canvas.style.width = viewport.width + "px";
-        canvas.style.height = viewport.height + "px";
-        const ctx = canvas.getContext("2d");
-        ctx.scale(dpr, dpr);
-
-        await pdfPage.render({ canvasContext: ctx, viewport }).promise;
-        if (token !== renderToken) return;
-
-        pageDiv.appendChild(canvas);
-
-        // Liteparse reports coordinates in PDF points with top-left origin,
-        // matching pdf.js's viewport when scale = 1. Scale everything by `scale`.
-        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-        svg.setAttribute("viewBox", `0 0 ${viewport.width} ${viewport.height}`);
-        svg.setAttribute("preserveAspectRatio", "none");
-
-        for (const item of pageData.textItems) {
-          const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-          rect.setAttribute("x", item.x * scale);
-          rect.setAttribute("y", item.y * scale);
-          rect.setAttribute("width", Math.max(item.width * scale, 1));
-          rect.setAttribute("height", Math.max(item.height * scale, 1));
-          if (item.confidence != null) rect.classList.add("ocr");
-          const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
-          title.textContent = item.text;
-          rect.appendChild(title);
-          svg.appendChild(rect);
-        }
-
-        pageDiv.appendChild(svg);
-        pdfView.appendChild(pageDiv);
       }
     }
 
