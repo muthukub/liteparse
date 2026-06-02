@@ -106,6 +106,16 @@ jobs:
             target
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-python-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Stage pdfium for wheel inclusion
+        if: ${{ !matrix.musl }}
+        shell: bash
+        # Pre-download pdfium and place it at packages/python/liteparse/<dylib>
+        # so the `[tool.maturin] include` rule packs it into the wheel during
+        # the build below. This is what gets the dylib listed in the wheel's
+        # RECORD manifest — appending it after the build leaves RECORD out of
+        # sync, which Poetry warns about.
+        run: bash packages/python/scripts/download-pdfium.sh ${{ matrix.target }}
+
       - name: Build wheels (glibc)
         if: ${{ !matrix.musl }}
         uses: PyO3/maturin-action@v1
@@ -142,54 +152,6 @@ jobs:
           # The container runs as root; fix perms so subsequent steps can
           # read/upload the produced wheel.
           sudo chmod -R a+rw packages/python/dist/ || true
-
-      - name: Copy pdfium dylib into wheel (Unix)
-        if: runner.os != 'Windows'
-        working-directory: packages/python
-        run: |
-          # Fix permissions from Docker/maturin build
-          sudo chmod -R a+rw dist/ || true
-          # Find pdfium in target/ (mounted from Docker) or cache
-          PDFIUM_LIB=$(find ../../target -name "libpdfium.so" -type f 2>/dev/null | head -1 || true)
-          if [ -z "$PDFIUM_LIB" ]; then
-            PDFIUM_LIB=$(find ~/.cache/pdfium-rs -name "libpdfium.so" -type f 2>/dev/null | head -1 || true)
-          fi
-          if [ -n "$PDFIUM_LIB" ]; then
-            export PDFIUM_LIB_PATH="$(dirname "$PDFIUM_LIB")"
-          fi
-          bash scripts/copy-pdfium.sh
-          if [ "$(uname -s)" = "Darwin" ]; then
-            DYLIB="libpdfium.dylib"
-          else
-            DYLIB="libpdfium.so"
-          fi
-          for whl in dist/*.whl; do
-            python scripts/inject_dylib.py "$whl" "liteparse/$DYLIB" "liteparse/$DYLIB"
-          done
-
-      - name: Copy pdfium dylib into wheel (Windows)
-        if: runner.os == 'Windows'
-        working-directory: packages/python
-        shell: pwsh
-        run: |
-          $cacheBase = "$env:LOCALAPPDATA\pdfium-rs"
-          if (-not (Test-Path $cacheBase)) {
-            $cacheBase = "$env:USERPROFILE\.cache\pdfium-rs"
-          }
-          $dll = Get-ChildItem -Path $cacheBase -Recurse -Filter "pdfium.dll" | Select-Object -First 1
-          if (-not $dll) {
-            $dll = Get-ChildItem -Path "..\..\target" -Recurse -Filter "pdfium.dll" | Select-Object -First 1
-          }
-          if ($dll) {
-            Copy-Item $dll.FullName -Destination "liteparse\pdfium.dll"
-            Write-Host "Copied $($dll.FullName) -> liteparse\pdfium.dll"
-            foreach ($whl in Get-ChildItem dist\*.whl) {
-              python scripts/inject_dylib.py $whl.FullName "liteparse/pdfium.dll" "liteparse/pdfium.dll"
-            }
-          } else {
-            Write-Error "Could not find pdfium.dll"
-            exit 1
-          }
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
