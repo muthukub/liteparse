@@ -37,6 +37,7 @@ pub(super) fn classify_page(page: &ParsedPage, heading_map: &[(f32, u8)]) -> Vec
         &std::collections::HashSet::new(),
         &[],
         crate::config::ImageMode::Placeholder,
+        &std::collections::HashSet::new(),
     )
 }
 
@@ -54,6 +55,7 @@ pub fn classify_page_with_filters(
     header_footer: &std::collections::HashSet<String>,
     outline: &[OutlineTarget],
     image_mode: crate::config::ImageMode,
+    chrome_indices: &std::collections::HashSet<usize>,
 ) -> Vec<Block> {
     let mut blocks: Vec<Block> = Vec::new();
     let mut paragraph: Option<ParaAccum> = None;
@@ -69,6 +71,12 @@ pub fn classify_page_with_filters(
     // Most recent ProjectedLine appended to the active list item, for
     // gap/font-size checks on continuation lines.
     let mut last_list_line: Option<ProjectedLine> = None;
+    // (level, last line) of a heading block currently being accumulated. Lets a
+    // multi-line wrapped heading/caption (e.g. a photo caption set one size
+    // above body) merge into one Heading block instead of shredding into one
+    // `###` per wrapped line. Adjacency is enforced by checking `blocks.last()`,
+    // so this never reaches across an intervening block.
+    let mut heading_run: Option<(u8, ProjectedLine)> = None;
 
     let flush_paragraph = |blocks: &mut Vec<Block>, p: Option<ParaAccum>| {
         if let Some(acc) = p
@@ -98,16 +106,20 @@ pub fn classify_page_with_filters(
     // Strip running header/footer lines up-front so they don't leak into
     // table detection (a repeating two-column footer would otherwise look
     // like a 2-row table) or paragraph grouping.
-    let filtered_owned: Vec<ProjectedLine> = if header_footer.is_empty() {
+    let need_filter = !header_footer.is_empty() || !chrome_indices.is_empty();
+    let filtered_owned: Vec<ProjectedLine> = if !need_filter {
         Vec::new()
     } else {
         page.projected_lines
             .iter()
-            .filter(|l| !is_header_or_footer(l, page, header_footer))
-            .cloned()
+            .enumerate()
+            .filter(|(idx, l)| {
+                !chrome_indices.contains(idx) && !is_header_or_footer(l, page, header_footer)
+            })
+            .map(|(_, l)| l.clone())
             .collect()
     };
-    let lines: &[ProjectedLine] = if header_footer.is_empty() {
+    let lines: &[ProjectedLine] = if !need_filter {
         &page.projected_lines
     } else {
         &filtered_owned
@@ -353,6 +365,20 @@ pub fn classify_page_with_filters(
         } else {
             heading_level_for(line.dominant_font_size, heading_map)
         };
+        // Guard against height-jitter false headings: a line that flows from
+        // the previous line (same paragraph) AND starts lowercase is a
+        // mid-paragraph continuation, not a heading — even if its
+        // height-estimated size jittered into a heading slot. A real heading
+        // has a break above it and is capitalized, so it won't satisfy both.
+        // Outline / struct-tree levels are explicit and bypass this guard.
+        let size_level = size_level.filter(|_| {
+            let starts_lower = text.chars().next().is_some_and(|c| c.is_lowercase());
+            let prev = paragraph
+                .as_ref()
+                .map(|p| &p.last)
+                .or(last_list_line.as_ref());
+            !(starts_lower && prev.is_some_and(|p| continues_paragraph(p, line)))
+        });
         // A standalone "Contents" / "Table of Contents" / "Index" line is
         // almost always a real H1, even when `page_is_toc` is false — many
         // TOCs list entries without inline trailing page numbers, so the
@@ -368,6 +394,24 @@ pub fn classify_page_with_filters(
             .or(toc_title_level)
             .map(|l| l.clamp(1, MAX_HEADING_LEVELS as u8));
         if let Some(level) = level {
+            // Merge a wrapped continuation into the heading directly above when
+            // it flows as one block: same level, the heading is still the last
+            // emitted block, and the line continues the paragraph. A real
+            // section heading is followed by body text (which breaks the run),
+            // so only a genuinely multi-line heading/caption merges here.
+            if let Some((run_level, run_line)) = heading_run.as_ref()
+                && *run_level == level
+                && continues_paragraph(run_line, line)
+                && let Some(Block::Heading {
+                    level: last_level,
+                    text: htext,
+                }) = blocks.last_mut()
+                && *last_level == level
+            {
+                append_inline_continuation(htext, text, &collapse_whitespace(text));
+                heading_run = Some((level, line.clone()));
+                continue;
+            }
             flush_paragraph(&mut blocks, paragraph.take());
             list_base_indent = None;
             last_list_item_idx = None;
@@ -376,6 +420,7 @@ pub fn classify_page_with_filters(
                 level,
                 text: collapse_whitespace(text),
             });
+            heading_run = Some((level, line.clone()));
             continue;
         }
 
@@ -722,6 +767,7 @@ mod tests {
             &set,
             &[],
             crate::config::ImageMode::Placeholder,
+            &std::collections::HashSet::new(),
         );
         let s = render_blocks(&blocks);
         assert!(!s.contains("Acme Confidential"), "got: {s}");

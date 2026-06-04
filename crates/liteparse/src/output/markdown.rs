@@ -1,7 +1,7 @@
 use crate::config::ImageMode;
 use crate::markdown_layout::{
     build_heading_map, classify_page_with_filters, compute_body_size, compute_header_footer_set,
-    render_blocks,
+    detect_single_page_chrome, render_blocks,
 };
 use crate::types::{OutlineTarget, ParsedPage};
 
@@ -56,12 +56,14 @@ pub fn format_markdown(
             .filter(|e| e.page_index == target_index)
             .cloned()
             .collect();
+        let chrome_indices = detect_single_page_chrome(page, body_size);
         let blocks = classify_page_with_filters(
             page,
             &heading_map,
             &header_footer,
             &page_outline,
             image_mode,
+            &chrome_indices,
         );
         out.push_str(&render_blocks(&blocks));
     }
@@ -85,6 +87,7 @@ mod tests {
             anchor: Anchor::Left,
             indent_x: x,
             dominant_font_size: size,
+            font_size_is_estimated: false,
             dominant_font_name: Some("Arial".into()),
             all_bold: false,
             all_italic: false,

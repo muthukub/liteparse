@@ -237,6 +237,12 @@ pub struct ProjectedLine {
     pub anchor: Anchor,
     pub indent_x: f32,
     pub dominant_font_size: f32,
+    /// True when `dominant_font_size` was derived from bbox height (PDFium
+    /// reported the font size baked into the text matrix, ~1.0) rather than a
+    /// real font-size value. Height-derived sizes jitter ±1pt line-to-line
+    /// based on glyph content (descenders, parens, capitals), so heading
+    /// detection must use a wider margin over body for these lines.
+    pub font_size_is_estimated: bool,
     pub dominant_font_name: Option<String>,
     pub all_bold: bool,
     pub all_italic: bool,

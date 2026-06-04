@@ -2664,11 +2664,24 @@ pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
                 page.page_width,
                 page.page_height,
             );
+            // Pre-projection ruled-table detection. Feeds XY-cut as obstacles
+            // so a table's inter-column gaps don't get picked as page-level
+            // V-cuts (column-major reading order is the dominant TEDS=0
+            // failure mode on the bench: docs 083/120/130/etc.).
+            let table_rects = crate::markdown_layout::detect_table_rects(
+                &page.graphics,
+                page.page_width,
+                page.page_height,
+            );
+            let mut obstacles: Vec<Rect> =
+                Vec::with_capacity(figures.len() + table_rects.len());
+            obstacles.extend(figures.iter().cloned());
+            obstacles.extend(table_rects.iter().cloned());
             let (projected_lines, regions) = build_projected_lines(
                 &projected_items,
                 page.page_width,
                 page.page_height,
-                &figures,
+                &obstacles,
             );
             ParsedPage {
                 page_number: page.page_number,
@@ -3035,12 +3048,19 @@ fn xy_find_best_cut(
                 let score = width as f32 * depth;
                 let mid = (s as f32 + e as f32) * 0.5;
                 let position = origin + mid * XY_BUCKET_PT;
-                if best.as_ref().is_none_or(|b| score > b.score) {
-                    best = Some(CutCandidate {
-                        axis,
-                        position,
-                        score,
-                    });
+                // Density-stamping alone isn't always enough to push the
+                // gutter inside a table region below threshold — the
+                // inter-cell gaps win on tables with sparsely-filled cells
+                // (docs 120/180/150). Hard-reject any cut line that passes
+                // strictly through an obstacle rect intersecting `bbox`.
+                if !cut_line_passes_through_obstacle(axis, position, bbox, figures) {
+                    if best.as_ref().is_none_or(|b| score > b.score) {
+                        best = Some(CutCandidate {
+                            axis,
+                            position,
+                            score,
+                        });
+                    }
                 }
             }
         } else {
@@ -3048,6 +3068,45 @@ fn xy_find_best_cut(
         }
     }
     best
+}
+
+/// Hard-reject companion to the density-stamping in `xy_find_best_cut`.
+/// Density-stamping makes the recursion *prefer* cuts around obstacles, but
+/// sparsely-filled tables (docs 120/180/150) have inter-cell gaps that still
+/// score better than the stamped obstacle band. Returns true iff the cut
+/// line at `position` strictly passes through any obstacle that intersects
+/// `bbox`.
+fn cut_line_passes_through_obstacle(
+    axis: CutAxis,
+    position: f32,
+    bbox: &Rect,
+    obstacles: &[Rect],
+) -> bool {
+    // Tolerance: a cut whose position lands within ~1pt of an obstacle's
+    // edge is allowed (the obstacle's edge is itself a natural cut line).
+    const EDGE_TOLERANCE_PT: f32 = 1.0;
+    for ob in obstacles {
+        // Skip obstacles that don't intersect bbox at all.
+        let ox0 = ob.x.max(bbox.x);
+        let oy0 = ob.y.max(bbox.y);
+        let ox1 = (ob.x + ob.width).min(bbox.x + bbox.width);
+        let oy1 = (ob.y + ob.height).min(bbox.y + bbox.height);
+        if ox1 <= ox0 || oy1 <= oy0 {
+            continue;
+        }
+        let through = match axis {
+            CutAxis::Vertical => {
+                position > ox0 + EDGE_TOLERANCE_PT && position < ox1 - EDGE_TOLERANCE_PT
+            }
+            CutAxis::Horizontal => {
+                position > oy0 + EDGE_TOLERANCE_PT && position < oy1 - EDGE_TOLERANCE_PT
+            }
+        };
+        if through {
+            return true;
+        }
+    }
+    false
 }
 
 fn xy_split_bbox(bbox: &Rect, cut: &CutCandidate) -> (Rect, Rect) {
@@ -3255,6 +3314,34 @@ fn xy_find_column_cut(
     })
 }
 
+/// X position of the vertical gutter that splits `idxs` (within `bbox`) into
+/// columns — from the density V-cut or the column-start histogram fallback.
+/// `None` when the region is single-column. Used to decide whether peeling a
+/// wide spanning line above this region is productive.
+fn column_cut_x(
+    items: &[ProjectedTextItem],
+    idxs: &[usize],
+    bbox: &Rect,
+    median_h: f32,
+    figures: &[Rect],
+) -> Option<f32> {
+    xy_find_best_cut(items, idxs, bbox, CutAxis::Vertical, median_h, figures)
+        .or_else(|| xy_find_column_cut(items, idxs, bbox, median_h))
+        .map(|c| c.position)
+}
+
+/// Union horizontal extent (min x, max x) of `idxs`.
+fn x_extent(items: &[ProjectedTextItem], idxs: &[usize]) -> (f32, f32) {
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    for &i in idxs {
+        let it = &items[i].item;
+        lo = lo.min(it.x);
+        hi = hi.max(it.x + it.width.max(0.0));
+    }
+    (lo, hi)
+}
+
 fn xy_find_banner_cut(
     items: &[ProjectedTextItem],
     idxs: &[usize],
@@ -3437,6 +3524,8 @@ fn xy_cut_rec(
             kind: RegionKind::Leaf { item_indices: all },
         };
     }
+    let (left_bbox, right_bbox) = xy_split_bbox(&bbox, &cut);
+
     // Banner cuts (score = ∞) at the page root are explicitly meant to
     // isolate single-line wide headers like titles, so skip the min-lines
     // guard for them. At deeper recursion levels we keep the guard — an
@@ -3449,7 +3538,34 @@ fn xy_cut_rec(
     if cut.axis == CutAxis::Horizontal && !allow_single_line {
         let lc = xy_distinct_lines(items, &left, median_h);
         let rc = xy_distinct_lines(items, &right, median_h);
-        if lc < XY_MIN_LINES_PER_H_SIDE || rc < XY_MIN_LINES_PER_H_SIDE {
+        // Rescue: a single wide spanning line (e.g. a centered authors /
+        // affiliation line above a two-column body) is worth isolating even
+        // mid-recursion when peeling it reveals the column gutter underneath.
+        // Otherwise the spanning line straddles the gutter, the V-cut can
+        // never fire, and the whole body interleaves column-by-column. The
+        // density H-cut that peels it has a finite score (the line is often
+        // just under the banner width threshold), so this is NOT gated on a
+        // banner cut. Discriminator vs. carving a single-column caption out of
+        // running prose: the thin side must be one line whose x-extent crosses
+        // the gutter revealed on the other (multi-line) side.
+        let spanning_rescue = {
+            let thin_wide = if lc < XY_MIN_LINES_PER_H_SIDE && rc >= XY_MIN_LINES_PER_H_SIDE {
+                Some(((&left, lc), (&right, &right_bbox)))
+            } else if rc < XY_MIN_LINES_PER_H_SIDE && lc >= XY_MIN_LINES_PER_H_SIDE {
+                Some(((&right, rc), (&left, &left_bbox)))
+            } else {
+                None
+            };
+            thin_wide.is_some_and(|((thin, thin_lines), (wide, wide_bbox))| {
+                thin_lines <= 1
+                    && column_cut_x(items, wide, wide_bbox, median_h, figures)
+                        .is_some_and(|gx| {
+                            let (tx0, tx1) = x_extent(items, thin);
+                            tx0 < gx - 1.0 && tx1 > gx + 1.0
+                        })
+            })
+        };
+        if (lc < XY_MIN_LINES_PER_H_SIDE || rc < XY_MIN_LINES_PER_H_SIDE) && !spanning_rescue {
             let mut all = left;
             all.extend(right);
             return Region {
@@ -3459,7 +3575,7 @@ fn xy_cut_rec(
         }
     }
 
-    let (left_bbox, right_bbox) = xy_split_bbox(&bbox, &cut);
+
     let left_region = xy_cut_rec(items, left, left_bbox, depth + 1, median_h, figures);
     let right_region = xy_cut_rec(items, right, right_bbox, depth + 1, median_h, figures);
     Region {
@@ -3561,9 +3677,17 @@ pub(crate) fn build_projected_lines(
         let mut current: Vec<usize> = Vec::new();
         let mut current_y: f32 = 0.0;
         let mut current_h: f32 = 0.0;
+        // PDFium occasionally reports anomalously large item heights (e.g.
+        // 56pt for a single-word run whose real glyph height is ~13pt) when
+        // the font's bounding box / line-height is baked into the text-matrix
+        // scale. Without a cap, the y-band tolerance `max(h) * 0.5` swallows
+        // multiple distinct baselines into one projected line (visible on
+        // docs 121, 122 — fill-in-the-blank lab worksheets). Clamp at 24pt
+        // for the banding decision; the actual stored line bbox is unchanged.
+        const Y_BAND_HEIGHT_CAP: f32 = 24.0;
         for idx in sorted {
             let y = items[idx].item.y;
-            let h = items[idx].item.height.max(1.0);
+            let h = items[idx].item.height.max(1.0).min(Y_BAND_HEIGHT_CAP);
             if current.is_empty() {
                 current.push(idx);
                 current_y = y;
@@ -3713,14 +3837,15 @@ fn build_one_line(
     // Fallback: when PDFium reports font_size ≤ 1.5 (size baked into the text
     // matrix), use char-weighted bbox height instead so heading detection has
     // something to chew on. Documented in MARKDOWN_PROGRESS.md.
-    let dominant_font_size = if dominant_size_from_font > 1.5 {
-        dominant_size_from_font
+    let (dominant_font_size, font_size_is_estimated) = if dominant_size_from_font > 1.5 {
+        (dominant_size_from_font, false)
     } else {
-        height_weights
+        let h = height_weights
             .values()
             .max_by_key(|(_, n)| *n)
             .map(|(h, _)| *h)
-            .unwrap_or(0.0)
+            .unwrap_or(0.0);
+        (h, true)
     };
 
     let dominant_font_name = name_weights
@@ -3766,6 +3891,7 @@ fn build_one_line(
         // this for paragraph/list-indent comparisons within a single column.
         indent_x: bbox.x,
         dominant_font_size,
+        font_size_is_estimated,
         dominant_font_name,
         all_bold: majority(bold_chars),
         all_italic: majority(italic_chars),
@@ -4027,6 +4153,59 @@ mod tests {
         // should be at least as strong. We mostly just want to confirm both
         // paths return without panicking and the figure path produces a split.
         let _ = region_no_fig;
+    }
+
+    fn has_vertical_split(region: &Region) -> bool {
+        match &region.kind {
+            RegionKind::Split { axis, children } => {
+                *axis == CutAxis::Vertical
+                    || children.iter().any(has_vertical_split)
+            }
+            RegionKind::Leaf { .. } => false,
+        }
+    }
+
+    fn two_column_body(items: &mut Vec<ProjectedTextItem>, y0: f32) {
+        // Left column at x≈50..280, right column at x≈320..550, sharing y-bands.
+        for row in 0..8 {
+            let y = y0 + row as f32 * 14.0;
+            items.push(item_at("left column body text here", 50.0, y, 230.0, 12.0));
+            items.push(item_at("right column body text here", 320.0, y, 230.0, 12.0));
+        }
+    }
+
+    #[test]
+    fn spanning_line_above_columns_is_peeled_to_reveal_gutter() {
+        // A single centered line that crosses the gutter (x 160..450, gutter
+        // ≈300) sits above a clean two-column body. The spanning line straddles
+        // the gutter so the body can't V-cut until it's peeled. The rescue in
+        // the min-lines guard must allow the (finite-score) H-cut that isolates
+        // the spanning line, after which the body splits into columns.
+        let mut items = vec![item_at("Centered Spanning Author Line", 160.0, 100.0, 290.0, 12.0)];
+        two_column_body(&mut items, 140.0);
+        let region = xy_cut(&items, 612.0, 792.0, &[]);
+        assert!(
+            has_vertical_split(&region),
+            "spanning line should be peeled so the two-column body V-cuts"
+        );
+    }
+
+    #[test]
+    fn single_column_caption_is_not_peeled_into_columns() {
+        // A short centered line that sits entirely within the left column
+        // (x 60..200, never crossing the gutter) must NOT trigger the spanning
+        // rescue — it's a caption in running prose, not a column-straddling
+        // banner. The body below it is genuinely single-column.
+        let mut items = vec![item_at("Short caption", 60.0, 100.0, 140.0, 12.0)];
+        for row in 0..8 {
+            let y = 140.0 + row as f32 * 14.0;
+            items.push(item_at("single column running body text", 50.0, y, 230.0, 12.0));
+        }
+        let region = xy_cut(&items, 612.0, 792.0, &[]);
+        assert!(
+            !has_vertical_split(&region),
+            "single-column caption must not be carved into columns"
+        );
     }
 
     #[test]

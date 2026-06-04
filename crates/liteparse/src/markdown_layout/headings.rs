@@ -8,6 +8,16 @@ use super::tables::{TABLE_MIN_COLUMNS, split_cells};
 /// Tolerance in points for "is this size larger than the body size".
 pub(super) const HEADING_SIZE_EPSILON: f32 = 0.5;
 
+/// Margin (points) a *height-estimated* size must clear over body before it
+/// counts as a heading size. When PDFium bakes the font size into the text
+/// matrix, `dominant_font_size` falls back to bbox height, which jitters ±1pt
+/// line-to-line (descenders, parens, capitals). The small `HEADING_SIZE_EPSILON`
+/// then admits jittered body lines as a bogus heading level (e.g. 10pt over a
+/// 9pt body), promoting every tall-glyph body line to a heading. Real headings
+/// in these docs are ≥2pt over body, so a wider margin filters the jitter while
+/// keeping genuine headings.
+pub(super) const ESTIMATED_HEADING_SIZE_MARGIN: f32 = 1.5;
+
 /// Cap on heading levels (matches plan: H1..H6).
 pub(super) const MAX_HEADING_LEVELS: usize = 6;
 
@@ -391,6 +401,13 @@ pub(super) fn looks_like_numbered_bold_heading(
 /// all pages. Rotated lines are excluded so a long rotated sidebar can't
 /// pull the body estimate. Falls back to `0.0` when no font-size info is
 /// available.
+/// A size whose char-weight is at least this fraction of the top size's weight
+/// is considered a co-dominant body block. When two sizes are co-dominant, the
+/// larger one is the body: dense small-print blocks (references,
+/// acknowledgments, footnotes) routinely out-weigh the main narrative by raw
+/// char count, but the body is never *smaller* than its own footnotes.
+const BODY_CODOMINANT_FRACTION: f32 = 0.5;
+
 pub fn compute_body_size(pages: &[ParsedPage]) -> f32 {
     use std::collections::HashMap;
     let mut weights: HashMap<u32, (f32, usize)> = HashMap::new();
@@ -409,11 +426,19 @@ pub fn compute_body_size(pages: &[ParsedPage]) -> f32 {
             entry.1 += chars;
         }
     }
+    let max_weight = weights.values().map(|(_, n)| *n).max().unwrap_or(0);
+    if max_weight == 0 {
+        return 0.0;
+    }
+    let threshold = (max_weight as f32 * BODY_CODOMINANT_FRACTION) as usize;
+    // Among sizes that are co-dominant with the heaviest size, pick the
+    // largest. This rescues the true body when a dense references/footnote
+    // block at a smaller size would otherwise win the raw char-weight vote.
     weights
         .values()
-        .max_by_key(|(_, n)| *n)
+        .filter(|(_, n)| *n >= threshold)
         .map(|(s, _)| *s)
-        .unwrap_or(0.0)
+        .fold(0.0_f32, f32::max)
 }
 
 /// Minimum total non-whitespace characters across all occurrences at a font
@@ -463,7 +488,12 @@ pub fn build_heading_map(pages: &[ParsedPage], body_size: f32) -> Vec<(f32, u8)>
                 continue;
             }
             let size = line.dominant_font_size;
-            if size > body_size + HEADING_SIZE_EPSILON {
+            let margin = if line.font_size_is_estimated {
+                ESTIMATED_HEADING_SIZE_MARGIN
+            } else {
+                HEADING_SIZE_EPSILON
+            };
+            if size > body_size + margin {
                 let key = (size * 100.0).round() as u32;
                 let entry = sizes.entry(key).or_insert((size, 0, 0, 0));
                 entry.1 += 1;
