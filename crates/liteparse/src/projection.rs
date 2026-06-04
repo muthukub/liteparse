@@ -473,6 +473,18 @@ fn form_lines(
         (x1, y1, x2 - x1, y2 - y1)
     }
 
+    fn merge_orig_bbox(prev: &mut ProjectedTextItem, cur: &ProjectedTextItem) {
+        let x1 = prev.orig_x.min(cur.orig_x);
+        let y1 = prev.orig_y.min(cur.orig_y);
+        let x2 = (prev.orig_x + prev.orig_width).max(cur.orig_x + cur.orig_width);
+        let y2 = (prev.orig_y + prev.orig_height).max(cur.orig_y + cur.orig_height);
+
+        prev.orig_x = x1;
+        prev.orig_y = y1;
+        prev.orig_width = x2 - x1;
+        prev.orig_height = y2 - y1;
+    }
+
     // Merge continuous bbox items in a single linear pass.
     let merge_y_tolerance = 0.1;
     let merge_h_tolerance = 0.1;
@@ -492,6 +504,7 @@ fn form_lines(
                 prev.item.y = merged.1;
                 prev.item.width = merged.2;
                 prev.item.height = merged.3;
+                merge_orig_bbox(prev, &cur);
             }
         } else {
             merged_items.push(cur);
@@ -636,6 +649,7 @@ fn form_lines(
                 if y_compatible && !both_are_numbers && delta_x <= MERGE_THRESHOLD {
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
                     prev.item.text.push_str(&item.item.text);
+                    merge_orig_bbox(prev, &item);
                     continue;
                 }
 
@@ -647,6 +661,7 @@ fn form_lines(
                         prev.item.text.push(' ');
                     }
                     prev.item.text.push_str(&item.item.text);
+                    merge_orig_bbox(prev, &item);
                     continue;
                 }
             }
@@ -2747,6 +2762,85 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert!(parsed[0].text.is_empty());
         assert!(parsed[0].text_items.is_empty());
+    }
+
+    #[test]
+    fn project_pages_to_grid_unions_original_bbox_when_word_items_merge() {
+        let y = 50.25;
+        let pages = vec![Page {
+            page_number: 1,
+            page_width: 612.0,
+            page_height: 792.0,
+            text_items: vec![
+                TextItem {
+                    text: "A".to_string(),
+                    x: 10.0,
+                    y,
+                    width: 10.0,
+                    height: 8.0,
+                    ..Default::default()
+                },
+                TextItem {
+                    text: "B".to_string(),
+                    x: 24.0,
+                    y: y + 0.01,
+                    width: 8.0,
+                    height: 7.5,
+                    ..Default::default()
+                },
+            ],
+        }];
+
+        let parsed = project_pages_to_grid(pages);
+        let item = parsed[0]
+            .text_items
+            .iter()
+            .find(|item| item.text == "A B")
+            .expect("merged text item");
+
+        assert!((item.x - 10.0).abs() < 0.001);
+        assert!((item.y - y).abs() < 0.001);
+        assert!((item.width - 22.0).abs() < 0.001);
+        assert!((item.height - 8.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn project_pages_to_grid_unions_original_bbox_when_continuous_items_merge() {
+        let pages = vec![Page {
+            page_number: 1,
+            page_width: 612.0,
+            page_height: 792.0,
+            text_items: vec![
+                TextItem {
+                    text: "ab".to_string(),
+                    x: 40.0,
+                    y: 100.0,
+                    width: 10.2,
+                    height: 9.0,
+                    ..Default::default()
+                },
+                TextItem {
+                    text: "cd".to_string(),
+                    x: 50.2,
+                    y: 100.0,
+                    width: 12.3,
+                    height: 9.0,
+                    ..Default::default()
+                },
+            ],
+        }];
+
+        let parsed = project_pages_to_grid(pages);
+        let item = parsed[0]
+            .text_items
+            .iter()
+            .find(|item| item.text == "abcd")
+            .expect("merged continuous text item");
+
+        assert!((item.x - 40.0).abs() < 0.001);
+        assert!((item.y - 100.0).abs() < 0.001);
+        assert!((item.width - 22.5).abs() < 0.01);
+        assert!((item.height - 9.0).abs() < 0.01);
     }
 
     #[test]
