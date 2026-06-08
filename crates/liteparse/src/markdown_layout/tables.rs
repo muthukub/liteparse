@@ -596,14 +596,47 @@ fn try_detect_table_inferred(
     start_idx: usize,
     floor: usize,
 ) -> Option<TableRun> {
+    let dbgt = std::env::var("LITEPARSE_DEBUG_TABLE").is_ok();
+    let seed_txt: String = lines[start_idx]
+        .spans
+        .iter()
+        .map(|s| s.text.trim())
+        .collect::<Vec<_>>()
+        .join("|");
+    macro_rules! bail {
+        ($($a:tt)*) => {{
+            if dbgt {
+                eprintln!("[tbl-inferred bail @{start_idx} \"{:.40}\"] {}", seed_txt, format!($($a)*));
+            }
+            return None;
+        }};
+    }
+
     let baseline_cells = split_cells(&lines[start_idx]);
     let tracks = infer_tracks_from_raw_items(lines, start_idx);
+    if dbgt {
+        eprintln!(
+            "[tbl-inferred try @{start_idx} \"{:.40}\"] tracks={} baseline={} xs=[{}]",
+            seed_txt,
+            tracks.len(),
+            baseline_cells.len(),
+            tracks
+                .iter()
+                .map(|t| format!("{t:.0}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+    }
     if tracks.len() < TABLE_MIN_COLUMNS {
-        return None;
+        bail!("tracks {} < MIN_COLUMNS", tracks.len());
     }
     // Only bother if we'd actually unlock more columns than the default path.
     if tracks.len() <= baseline_cells.len() {
-        return None;
+        bail!(
+            "tracks {} <= baseline {}",
+            tracks.len(),
+            baseline_cells.len()
+        );
     }
     // Reject "tracks" that are really inter-word positions in prose. Real
     // table columns are separated by visible whitespace gutters wider than
@@ -621,7 +654,7 @@ fn try_detect_table_inferred(
         .map(|w| w[1] - w[0])
         .fold(f32::INFINITY, f32::min);
     if min_gap < min_track_gap {
-        return None;
+        bail!("min_gap {min_gap:.1} < {min_track_gap:.1}");
     }
     let column_count = tracks.len();
     let track_ranges: Vec<(f32, f32)> = tracks.iter().map(|&t| (t, t)).collect();
@@ -635,15 +668,15 @@ fn try_detect_table_inferred(
     // shred-on-whitespace seed that's indistinguishable from a real
     // table. Subsequent rows can still have merged spans recovered via
     // the multi-cover split path.
+    let tol = TABLE_TRACK_TOLERANCE_PT;
     let seed_spans: Vec<&TextItem> = lines[start_idx]
         .spans
         .iter()
         .filter(|s| !s.text.trim().is_empty())
         .collect();
     if seed_spans.len() < tracks.len() {
-        return None;
+        bail!("seed_spans {} < tracks {}", seed_spans.len(), tracks.len());
     }
-    let tol = TABLE_TRACK_TOLERANCE_PT;
     for s in &seed_spans {
         let x0 = s.x;
         let x1 = s.x + s.width.max(0.0);
@@ -652,12 +685,17 @@ fn try_detect_table_inferred(
             .filter(|&&t| t >= x0 - tol && t <= x1 + tol)
             .count();
         if covered > 1 {
-            return None;
+            bail!(
+                "seed span \"{:.20}\" covers {covered} tracks",
+                s.text.trim()
+            );
         }
     }
-    let first = cells_from_raw_items_with_tracks(&lines[start_idx], &tracks)?;
+    let Some(first) = cells_from_raw_items_with_tracks(&lines[start_idx], &tracks) else {
+        bail!("seed row cells unassignable");
+    };
     if first.iter().filter(|c| !c.text.is_empty()).count() < TABLE_MIN_COLUMNS {
-        return None;
+        bail!("seed populated cells < MIN_COLUMNS");
     }
     let mut rows: Vec<(usize, &ProjectedLine, Vec<TableCell>)> =
         vec![(start_idx, &lines[start_idx], first)];
@@ -672,6 +710,15 @@ fn try_detect_table_inferred(
             break;
         }
         let Some(cells) = cells_from_raw_items_with_tracks(&lines[j], &tracks) else {
+            if dbgt {
+                let rt: String = lines[j]
+                    .spans
+                    .iter()
+                    .map(|s| s.text.trim())
+                    .collect::<Vec<_>>()
+                    .join("|");
+                eprintln!("[tbl-inferred trunc @{j} \"{:.40}\"] row unassignable", rt);
+            }
             break;
         };
         // Drop rows that contribute zero populated cells (all out-of-band
@@ -683,12 +730,12 @@ fn try_detect_table_inferred(
         j += 1;
     }
     if rows.len() < TABLE_MIN_ROWS {
-        return None;
+        bail!("rows {} < MIN_ROWS", rows.len());
     }
     let cv = row_spacing_cv(&rows);
     if cv > TABLE_ROW_SPACING_MAX_CV {
         // Defer to the existing path, which can fall back to GridFallback.
-        return None;
+        bail!("row spacing cv {cv:.2} > {TABLE_ROW_SPACING_MAX_CV}");
     }
     let end = j;
 

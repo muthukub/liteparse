@@ -392,6 +392,37 @@ fn form_lines(
     // Y-tolerance for sorting: items within this threshold are considered same line
     let y_sort_tolerance: f32 = (median_height * 0.5).max(5.0);
 
+    let dbg_lines = std::env::var("LITEPARSE_DEBUG_LINES").is_ok();
+    let dump_lines = |stage: &str, lines: &[Vec<ProjectedTextItem>]| {
+        if !dbg_lines {
+            return;
+        }
+        eprintln!(
+            "[form_lines:{stage}] {} lines (mh={median_height:.1})",
+            lines.len()
+        );
+        for (li, ln) in lines.iter().enumerate() {
+            if ln.is_empty() {
+                continue;
+            }
+            let min_y = ln.iter().map(|i| i.item.y).fold(f32::INFINITY, f32::min);
+            let max_y = ln
+                .iter()
+                .map(|i| i.item.y + i.item.height)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let txt: String = ln
+                .iter()
+                .map(|i| i.item.text.trim())
+                .collect::<Vec<_>>()
+                .join("|");
+            eprintln!(
+                "  [{li:2}] y={min_y:.1}..{max_y:.1} n={} {:.70}",
+                ln.len(),
+                txt
+            );
+        }
+    };
+
     // For two-column documents, detect and mark margin line numbers
     if page_width > 0.0 {
         let midpoint = page_width / 2.0;
@@ -581,11 +612,19 @@ fn form_lines(
         ay.total_cmp(&by)
     });
 
+    dump_lines("after_group", &lines);
+
     // merge 'words'
     const MERGE_THRESHOLD: f32 = 1.0;
 
     fn looks_like_table_number(text: &str) -> bool {
-        let trimmed = text.trim();
+        // Strip trailing statistical-significance markers ("0.77**", "0.31 *")
+        // so decorated correlation/p-value cells still count as numbers. Without
+        // this, the `both_are_numbers` guard below misfires and two adjacent
+        // stat cells get merged into one, destroying the table's column tracks.
+        let trimmed = text
+            .trim()
+            .trim_end_matches(|c: char| c == '*' || c == '†' || c == '‡' || c.is_whitespace());
         if trimmed.chars().count() < 2 {
             return false;
         }
@@ -704,6 +743,21 @@ fn form_lines(
             };
 
             if !bbox_overlap {
+                if dbg_lines {
+                    let pj: String = lines[i - 1]
+                        .iter()
+                        .map(|x| x.item.text.trim())
+                        .collect::<Vec<_>>()
+                        .join("|");
+                    let cj: String = lines[i]
+                        .iter()
+                        .map(|x| x.item.text.trim())
+                        .collect::<Vec<_>>()
+                        .join("|");
+                    eprintln!(
+                        "[form_lines:overlap-merge] py={previous_min_y:.1}..{previous_max_y:.1} cy={current_min_y:.1}..{current_max_y:.1}\n    prev={pj:.60}\n    cur ={cj:.60}"
+                    );
+                }
                 let mut current = lines.remove(i);
                 lines[i - 1].append(&mut current);
                 lines[i - 1].sort_by(|a, b| a.item.x.total_cmp(&b.item.x));
@@ -713,6 +767,8 @@ fn form_lines(
 
         i += 1;
     }
+
+    dump_lines("after_overlap_merge", &lines);
 
     // Insert blank lines for vertical gaps between lines.
     let mut i = 1;
@@ -2858,6 +2914,13 @@ const XY_COLUMN_PEAK_DOMINANCE: f32 = 0.55;
 /// 90/10 split is almost certainly a single column with one off-x bullet
 /// stack, not a real two-column structure.
 const XY_COLUMN_PEAK_BALANCE_RATIO: f32 = 0.4;
+/// Minimum per-column horizontal fill for an N-column (3+ peak) split.
+/// Genuine N-column prose fills each inter-peak slot nearly edge-to-edge
+/// with text; a data table leaves wide intra-row whitespace, so its cells
+/// cover only a fraction of each slot. Gate the N-column split on the
+/// least-filled column so we keep splitting prose but bail (→ table
+/// detector) on sparse tabular layouts.
+const XY_COLUMN_MIN_FILL: f32 = 0.55;
 
 #[derive(Debug)]
 struct CutCandidate {
@@ -3196,40 +3259,92 @@ fn xy_find_column_cut(
     items: &[ProjectedTextItem],
     idxs: &[usize],
     bbox: &Rect,
-    _median_h: f32,
+    median_h: f32,
 ) -> Option<CutCandidate> {
+    let dbg = std::env::var("LITEPARSE_DEBUG_XY").is_ok();
+    macro_rules! reject {
+        ($($t:tt)*) => {{
+            if dbg { eprintln!("[xy col-reject] {}", format!($($t)*)); }
+            return None;
+        }};
+    }
     if bbox.width <= 1.0 || idxs.len() < 8 {
-        return None;
+        reject!("preflight: width={:.1} items={}", bbox.width, idxs.len());
     }
 
-    // Histogram of individual item left edges. We deliberately avoid
-    // first-line-then-leftmost banding because items in the same y-band can
-    // belong to *different* columns (left-column and right-column items at
-    // the same baseline), and folding them into "one line's x_min" hides
-    // the right column entirely. Instead, every item contributes its own x
-    // to the histogram; a real column edge shows up as a tall spike (many
-    // line-starts at one x) while mid-line continuation fragments spread
-    // their contribution across many buckets and don't form spikes.
+    // Identify "line-start" items: within each y-band, the first item of
+    // each horizontal run is a line-start. PDFium routinely emits mid-line
+    // word-cluster fragments as separate items; counting all of them in
+    // the histogram denominator dilutes the column-dominance ratio so the
+    // wide-side probe never trips after a footer-peel H-cut. A 2-column
+    // line at the same baseline contributes TWO line-starts (one per
+    // column) because the inter-column gutter exceeds `gutter_gap`, so we
+    // don't collapse a band to its single leftmost item.
+    let band_tol = (median_h * 0.5).max(2.0);
+    let gutter_gap = median_h.max(4.0);
+
+    let mut sorted: Vec<usize> = idxs.to_vec();
+    sorted.sort_by(|&a, &b| {
+        items[a]
+            .item
+            .y
+            .total_cmp(&items[b].item.y)
+            .then(items[a].item.x.total_cmp(&items[b].item.x))
+    });
+
+    let mut line_starts: Vec<f32> = Vec::with_capacity(idxs.len() / 2);
+    let mut k = 0;
+    while k < sorted.len() {
+        let band_y = items[sorted[k]].item.y;
+        let mut j = k;
+        while j < sorted.len() && (items[sorted[j]].item.y - band_y).abs() <= band_tol {
+            j += 1;
+        }
+        let mut band_items: Vec<usize> = sorted[k..j].to_vec();
+        band_items.sort_by(|&a, &b| items[a].item.x.total_cmp(&items[b].item.x));
+        let mut prev_right = f32::NEG_INFINITY;
+        for &idx in &band_items {
+            let it = &items[idx].item;
+            if it.x.is_finite() && it.x - prev_right > gutter_gap {
+                line_starts.push(it.x);
+            }
+            let right = it.x + it.width.max(0.0);
+            if right > prev_right {
+                prev_right = right;
+            }
+        }
+        k = j;
+    }
+
+    if line_starts.len() < 8 {
+        reject!(
+            "line_starts={} < 8 (items={})",
+            line_starts.len(),
+            idxs.len()
+        );
+    }
+
+    // Histogram extent uses full item bounds so `XY_COLUMN_MIN_GAP_FRACTION`
+    // calibration (fraction of layout width) is preserved. Only line-starts
+    // contribute to the bucket counts and the dominance denominator.
     let mut min_x = f32::INFINITY;
     let mut max_x = f32::NEG_INFINITY;
     for &i in idxs {
         let it = &items[i].item;
-        let x = it.x;
-        if x.is_finite() {
-            min_x = min_x.min(x);
-            max_x = max_x.max(x + it.width.max(0.0));
+        if it.x.is_finite() {
+            min_x = min_x.min(it.x);
+            max_x = max_x.max(it.x + it.width.max(0.0));
         }
     }
     if !min_x.is_finite() || max_x <= min_x + 1.0 {
-        return None;
+        reject!("degenerate extent min_x={min_x:.1} max_x={max_x:.1}");
     }
     let total_w = max_x - min_x;
     let bucket_pt = XY_COLUMN_BUCKET_PT;
     let n_buckets = ((total_w / bucket_pt).ceil() as usize).max(1);
     let mut hist = vec![0usize; n_buckets];
-    for &i in idxs {
-        let it = &items[i].item;
-        let b_f = ((it.x - min_x) / bucket_pt).floor();
+    for &x in &line_starts {
+        let b_f = ((x - min_x) / bucket_pt).floor();
         let b = b_f.max(0.0) as usize;
         if b < n_buckets {
             hist[b] += 1;
@@ -3269,8 +3384,23 @@ fn xy_find_column_cut(
     // Keep only "strong" peaks. A real column edge is sat-stacked by many
     // lines at the same left x; spurious peaks (a stray indented quote, a
     // numbered marker, etc.) carry only a few lines.
+    let strong_before = peaks.len();
+    let raw_counts: Vec<(f32, usize)> = peaks.clone();
     peaks.retain(|(_, c)| *c >= XY_COLUMN_MIN_LINES_PER_PEAK);
     if peaks.len() < 2 {
+        if dbg {
+            let preview: Vec<String> = raw_counts
+                .iter()
+                .take(8)
+                .map(|(x, c)| format!("({x:.0}:{c})"))
+                .collect();
+            eprintln!(
+                "[xy col-reject] peaks<2 after min_per_peak={} (raw={strong_before} strong={}): {}",
+                XY_COLUMN_MIN_LINES_PER_PEAK,
+                peaks.len(),
+                preview.join(",")
+            );
+        }
         return None;
     }
     peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -3280,47 +3410,192 @@ fn xy_find_column_cut(
     // edge of col 2) — even multi-paragraph indents are sub-peaks weak
     // enough to drop out under the min_per_peak filter. Bail when we see
     // more than 2 strong peaks so we don't slice tables.
+    // Tabular layouts produce 3+ strong peaks with comparable counts. But a
+    // real 2-column page can also produce 3+ peaks when a centered float
+    // (caption, sub-heading stack, pull-quote) sits between the columns and
+    // contributes line-starts at a mid x. Distinguish: if the top-2 peaks
+    // by count dominate the remainder, keep them and drop the rest;
+    // otherwise (top-3 are comparable → tabular) bail.
     if peaks.len() > 2 {
-        return None;
+        let mut by_count = peaks.clone();
+        by_count.sort_by(|a, b| b.1.cmp(&a.1));
+        let third = by_count[2].1 as f32;
+        let second = by_count[1].1 as f32;
+        let largest = by_count[0].1 as f32;
+        if second <= 0.0 || third / second >= XY_COLUMN_PEAK_BALANCE_RATIO {
+            // 3+ comparable peaks. Two shapes produce this: a genuine
+            // N-column prose layout (newspaper / magazine / multi-col
+            // reference list) or a data table. We can't bail on both —
+            // bailing leaves N-column prose joined line-by-line, which the
+            // borderless table detector then shreds into a fake table.
+            // Keep every peak balanced against the largest and let the
+            // gap logic cut the leftmost gutter; recursion re-runs on each
+            // side and peels the remaining columns one at a time. The
+            // downstream dominance + min-gap guards still reject tables
+            // whose cells don't tightly left-cluster (numeric columns are
+            // typically right-aligned / centered, so they never form
+            // strong left-edge peaks and fail dominance here).
+            let before = peaks.len();
+            peaks.retain(|(_, c)| {
+                largest <= 0.0 || (*c as f32) / largest >= XY_COLUMN_PEAK_BALANCE_RATIO
+            });
+            if peaks.len() < 2 {
+                reject!("peaks>2 but <2 balanced (largest={largest})");
+            }
+            // Fill-density gate: prose columns fill each inter-peak slot
+            // nearly edge-to-edge; table cells leave wide whitespace. Per
+            // band, measure each column's covered span / slot width; if the
+            // least-filled column is too sparse, treat as a table and bail.
+            let n = peaks.len();
+            let mut covered_sum = vec![0.0f32; n];
+            let mut band_count = vec![0usize; n];
+            let mut kk = 0;
+            while kk < sorted.len() {
+                let by = items[sorted[kk]].item.y;
+                let mut jj = kk;
+                while jj < sorted.len() && (items[sorted[jj]].item.y - by).abs() <= band_tol {
+                    jj += 1;
+                }
+                let mut lo_x = vec![f32::INFINITY; n];
+                let mut hi_x = vec![f32::NEG_INFINITY; n];
+                for &idx in &sorted[kk..jj] {
+                    let it = &items[idx].item;
+                    if !it.x.is_finite() {
+                        continue;
+                    }
+                    let mut c = 0;
+                    while c + 1 < n && it.x >= peaks[c + 1].0 {
+                        c += 1;
+                    }
+                    lo_x[c] = lo_x[c].min(it.x);
+                    hi_x[c] = hi_x[c].max(it.x + it.width.max(0.0));
+                }
+                for c in 0..n {
+                    if hi_x[c] > lo_x[c] {
+                        let col_w = if c + 1 < n {
+                            peaks[c + 1].0 - peaks[c].0
+                        } else {
+                            max_x - peaks[c].0
+                        };
+                        if col_w > 1.0 {
+                            covered_sum[c] += ((hi_x[c] - lo_x[c]) / col_w).min(1.0);
+                            band_count[c] += 1;
+                        }
+                    }
+                }
+                kk = jj;
+            }
+            let mut min_fill = f32::INFINITY;
+            for c in 0..n {
+                if band_count[c] > 0 {
+                    min_fill = min_fill.min(covered_sum[c] / band_count[c] as f32);
+                }
+            }
+            if dbg {
+                eprintln!("[xy col-fill] min_fill={min_fill:.2} (gate={XY_COLUMN_MIN_FILL})");
+            }
+            if min_fill.is_finite() && min_fill < XY_COLUMN_MIN_FILL {
+                reject!(
+                    "N-column fill {min_fill:.2} < {} (tabular)",
+                    XY_COLUMN_MIN_FILL
+                );
+            }
+            if dbg {
+                eprintln!(
+                    "[xy col-keep-N] kept {} of {} balanced peaks (N-column); xs=[{}]",
+                    peaks.len(),
+                    before,
+                    peaks
+                        .iter()
+                        .map(|(x, c)| format!("{x:.0}:{c}"))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+            }
+        } else {
+            // Top-2 dominate → assume real columns + weak floats. Keep
+            // top-2 (re-sorted left→right) and continue.
+            let mut top2 = vec![by_count[0], by_count[1]];
+            top2.sort_by(|a, b| a.0.total_cmp(&b.0));
+            if dbg {
+                eprintln!(
+                    "[xy col-keep-top2] dropped {} weak peaks; kept xs=[{:.0}:{},{:.0}:{}]",
+                    peaks.len() - 2,
+                    top2[0].0,
+                    top2[0].1,
+                    top2[1].0,
+                    top2[1].1
+                );
+            }
+            peaks = top2;
+        }
     }
     // Require the two peaks to together dominate the histogram — a real
     // 2-column layout has the great majority of items starting at one of
     // the two column-left edges. Tables, lists, and prose with scattered
     // indents distribute their item-starts across many x's and won't pass.
     let peak_sum: usize = peaks.iter().map(|(_, c)| *c).sum();
-    let total_items = idxs.len();
-    if (peak_sum as f32) / (total_items as f32) < XY_COLUMN_PEAK_DOMINANCE {
-        return None;
+    let dominance = (peak_sum as f32) / (line_starts.len() as f32);
+    if dominance < XY_COLUMN_PEAK_DOMINANCE {
+        reject!(
+            "dominance {dominance:.2} < {} (peak_sum={peak_sum} line_starts={})",
+            XY_COLUMN_PEAK_DOMINANCE,
+            line_starts.len()
+        );
     }
-    // Require the two peaks to be roughly balanced in size. A real 2-column
-    // layout has comparable line counts on each side; a long-single-column
+    // Require the peaks to be roughly balanced in size. A real multi-column
+    // layout has comparable line counts in each column; a long-single-column
     // page that happens to have one bullet stack at a different x produces
-    // a tall + tiny peak pair that should not trigger a column split.
-    let (a, b) = (peaks[0].1, peaks[1].1);
-    let (smaller, larger) = (a.min(b) as f32, a.max(b) as f32);
-    if smaller / larger < XY_COLUMN_PEAK_BALANCE_RATIO {
-        return None;
+    // a tall + tiny peak pair that should not trigger a column split. Check
+    // the global min/max across all kept peaks so an N-column layout with one
+    // short column is also rejected.
+    let smallest = peaks.iter().map(|(_, c)| *c).min().unwrap() as f32;
+    let largest = peaks.iter().map(|(_, c)| *c).max().unwrap() as f32;
+    let balance = if largest > 0.0 {
+        smallest / largest
+    } else {
+        0.0
+    };
+    if balance < XY_COLUMN_PEAK_BALANCE_RATIO {
+        reject!(
+            "balance {balance:.2} < {} (min={smallest} max={largest} npeaks={})",
+            XY_COLUMN_PEAK_BALANCE_RATIO,
+            peaks.len()
+        );
     }
 
-    // Find the widest gap between adjacent strong peaks. Must clear
-    // `XY_COLUMN_MIN_GAP_FRACTION × total_w` — list-item indents and
-    // block-quote indents produce closely spaced peaks; a real column
-    // gutter is much further apart.
+    // Cut at the leftmost gutter that clears `XY_COLUMN_MIN_GAP_FRACTION ×
+    // total_w` (list-item / block-quote indents produce closely spaced peaks;
+    // a real column gutter is much further apart). For a 2-column layout this
+    // is the only gap. For N columns, peeling the leftmost column first and
+    // letting the recursion re-run on the remainder splits the rest one
+    // gutter at a time.
     let min_gap = total_w * XY_COLUMN_MIN_GAP_FRACTION;
     let mut best: Option<(f32, usize)> = None;
     for w_idx in 0..peaks.len() - 1 {
         let gap = peaks[w_idx + 1].0 - peaks[w_idx].0;
-        if gap >= min_gap && best.is_none_or(|(g, _)| gap > g) {
+        if gap >= min_gap {
             best = Some((gap, w_idx));
+            break;
         }
     }
-    let (_, li) = best?;
+    let li = match best {
+        Some((_, li)) => li,
+        None => reject!(
+            "no gap >= {:.0} (min_gap_frac={} total_w={total_w:.0}); peak_xs=[{:.0},{:.0}] gap={:.0}",
+            min_gap,
+            XY_COLUMN_MIN_GAP_FRACTION,
+            peaks[0].0,
+            peaks[1].0,
+            peaks[1].0 - peaks[0].0
+        ),
+    };
     let cut_x = (peaks[li].0 + peaks[li + 1].0) * 0.5;
     // Validate cut lands inside the bbox; if bbox-clamping moved the bbox
     // off the items (some PDFs have content with negative x), fall back to
     // an item-relative midpoint check.
     if cut_x <= min_x + 1.0 || cut_x >= max_x - 1.0 {
-        return None;
+        reject!("cut_x {cut_x:.0} outside extent [{min_x:.0},{max_x:.0}]");
     }
     // High finite score so this beats every density cut but stays below
     // banner's infinity.
@@ -3495,110 +3770,245 @@ fn xy_cut_rec(
     } else {
         None
     };
-    let cut = match (banner, column, h, v) {
-        (Some(bc), _, _, _) => Some(bc),
-        (None, Some(cc), _, _) => Some(cc),
-        (None, None, Some(hc), Some(vc)) => {
-            if vc.score > hc.score * XY_V_PREFERENCE_MARGIN {
-                Some(vc)
+    let debug_xy = std::env::var("LITEPARSE_DEBUG_XY").is_ok();
+    if debug_xy && depth == 0 && std::env::var("LITEPARSE_DEBUG_ITEMS").is_ok() {
+        for &i in &idxs {
+            let it = &items[i].item;
+            eprintln!(
+                "[xy item] x={:.1} w={:.1} y={:.1} h={:.1} text={:?}",
+                it.x,
+                it.width,
+                it.y,
+                it.height,
+                &it.text.chars().take(80).collect::<String>()
+            );
+        }
+    }
+    if debug_xy {
+        // Also probe what the column histogram WOULD return if we ran it
+        // unconditionally — this is the diagnostic that tells us whether
+        // reordering V/H/column priority would unlock more column splits.
+        let column_probe = xy_find_column_cut(items, &idxs, &bbox, median_h);
+        let pad = "  ".repeat(depth as usize);
+        let fmt = |c: &Option<CutCandidate>| {
+            c.as_ref()
+                .map(|c| format!("{:?}@{:.1}/{:.3}", c.axis, c.position, c.score))
+                .unwrap_or_else(|| "-".to_string())
+        };
+        let fmt_pos = |p: &Option<f32>| {
+            p.as_ref()
+                .map(|p| format!("{p:.1}"))
+                .unwrap_or_else(|| "-".to_string())
+        };
+        let (ex0, ex1) = x_extent(items, &idxs);
+        let lines = xy_distinct_lines(items, &idxs, median_h);
+        eprintln!(
+            "[xy d={depth}]{pad} bbox=({:.0},{:.0} {:.0}x{:.0}) items={} lines={} x_ext=[{ex0:.1},{ex1:.1}] banner={} h={} v={} col={} col_probe={}",
+            bbox.x,
+            bbox.y,
+            bbox.width,
+            bbox.height,
+            idxs.len(),
+            lines,
+            fmt(&banner),
+            fmt(&h),
+            fmt(&v),
+            fmt_pos(&column.as_ref().map(|c| c.position)),
+            fmt_pos(&column_probe.as_ref().map(|c| c.position)),
+        );
+    }
+    // Build a priority-ordered candidate list.
+    //
+    // **Primary** is the cut the original logic would have picked
+    // (banner → column → H/V resolved by score margin). **Fallback** is
+    // the column-histogram probe — but ONLY that, not density V or the
+    // other density axis. The column histogram has strong discriminators
+    // (2 strong dominant balanced peaks); a density V valley that lost to
+    // H by the score margin is often a layout coincidence (mid-line word
+    // clustering) we shouldn't trust as a fallback. Falling through to
+    // the histogram-only fallback — rather than collapsing to a leaf —
+    // is what unblocks 2-column pages whose density H-cut peels a
+    // footer/header but trips the min-lines guard.
+    let (h_score, v_score) = (h.as_ref().map(|c| c.score), v.as_ref().map(|c| c.score));
+    let prefer_h_over_v = match (h_score, v_score) {
+        (Some(hs), Some(vs)) => vs <= hs * XY_V_PREFERENCE_MARGIN,
+        _ => true,
+    };
+    let mut candidates: Vec<CutCandidate> = Vec::new();
+    if let Some(bc) = banner {
+        candidates.push(bc);
+    }
+    if let Some(cc) = column {
+        candidates.push(cc);
+    }
+    // Primary density cut, then the other axis as fallback. Without the
+    // alternate-axis fallback, a low-impact H-cut that wins by the score
+    // margin (e.g. peeling a 1-line footer) trips the min-lines guard and
+    // collapses the whole region to a single leaf — masking the real
+    // column structure the V-cut would have revealed.
+    if prefer_h_over_v {
+        if let Some(hc) = h {
+            candidates.push(hc);
+        }
+        if let Some(vc) = v {
+            candidates.push(vc);
+        }
+    } else {
+        if let Some(vc) = v {
+            candidates.push(vc);
+        }
+        if let Some(hc) = h {
+            candidates.push(hc);
+        }
+    }
+    // Final fallback: unconditional column-histogram probe. Skipped when
+    // an existing candidate is already a histogram-derived column cut
+    // (score = 1.0e9 from `xy_find_column_cut`).
+    if !candidates
+        .iter()
+        .any(|c| c.axis == CutAxis::Vertical && (c.score - 1.0e9).abs() < 1.0)
+    {
+        if let Some(cp) = xy_find_column_cut(items, &idxs, &bbox, median_h) {
+            candidates.push(cp);
+        }
+    }
+
+    for cut in candidates {
+        if debug_xy {
+            let pad = "  ".repeat(depth as usize);
+            eprintln!(
+                "[xy d={depth}]{pad} -> TRY {:?}@{:.1}/{:.3}",
+                cut.axis, cut.position, cut.score
+            );
+        }
+        let mut left: Vec<usize> = Vec::new();
+        let mut right: Vec<usize> = Vec::new();
+        // Column-histogram V-cuts (score = 1.0e9) split between two column
+        // left-edge clusters. The cut sits at the midpoint between the two
+        // peak x's, which is typically far inside the left column — a wide
+        // body line whose left half wraps to a second item starting before
+        // the column's right edge can have a centroid past the cut, which
+        // would mis-route it to the right column. Partition by left edge
+        // for these cuts: the item's column membership is determined by
+        // which peak its starting x is closer to, not by its midpoint.
+        // Density V-cuts (white-space valleys) split between physical
+        // text-free space — items truly straddle the cut only when wider
+        // than the column, and centroid is the right discriminator there.
+        let is_histogram_v_cut = cut.axis == CutAxis::Vertical && (cut.score - 1.0e9).abs() < 1.0;
+        for &i in &idxs {
+            let it = &items[i].item;
+            let split_at = match cut.axis {
+                CutAxis::Horizontal => it.y + it.height.max(0.0) * 0.5,
+                CutAxis::Vertical => {
+                    if is_histogram_v_cut {
+                        it.x
+                    } else {
+                        it.x + it.width.max(0.0) * 0.5
+                    }
+                }
+            };
+            if split_at < cut.position {
+                left.push(i);
             } else {
-                Some(hc)
+                right.push(i);
             }
         }
-        (None, None, Some(hc), None) => Some(hc),
-        (None, None, None, Some(vc)) => Some(vc),
-        (None, None, None, None) => None,
-    };
-    let Some(cut) = cut else {
+        if debug_xy {
+            let pad = "  ".repeat(depth as usize);
+            eprintln!(
+                "[xy d={depth}]{pad}    partition: left={} right={}",
+                left.len(),
+                right.len()
+            );
+        }
+        if left.is_empty() || right.is_empty() {
+            if debug_xy {
+                let pad = "  ".repeat(depth as usize);
+                eprintln!("[xy d={depth}]{pad}    -> degenerate, try next");
+            }
+            continue;
+        }
+        let (left_bbox, right_bbox) = xy_split_bbox(&bbox, &cut);
+
+        // Banner cuts (score = ∞) at the page root are explicitly meant to
+        // isolate single-line wide headers like titles, so skip the
+        // min-lines guard for them. At deeper recursion levels we keep the
+        // guard — an aggressive single-line banner cut mid-recursion
+        // fragments paragraphs around emphasized lines (e.g. a centered
+        // "Figure N caption" sandwiched between body paragraphs would
+        // otherwise carve out its own sliver region and break paragraph
+        // continuation).
+        let allow_single_line =
+            cut.axis == CutAxis::Horizontal && cut.score.is_infinite() && depth == 0;
+        if cut.axis == CutAxis::Horizontal && !allow_single_line {
+            let lc = xy_distinct_lines(items, &left, median_h);
+            let rc = xy_distinct_lines(items, &right, median_h);
+            // Rescue: a single wide spanning line (e.g. a centered
+            // authors / affiliation line above a two-column body) is
+            // worth isolating even mid-recursion when peeling it reveals
+            // the column gutter underneath. Otherwise the spanning line
+            // straddles the gutter, the V-cut can never fire, and the
+            // whole body interleaves column-by-column. The density H-cut
+            // that peels it has a finite score (the line is often just
+            // under the banner width threshold), so this is NOT gated on
+            // a banner cut. Discriminator vs. carving a single-column
+            // caption out of running prose: the thin side must be one
+            // line whose x-extent crosses the gutter revealed on the
+            // other (multi-line) side.
+            let spanning_rescue = {
+                let thin_wide = if lc < XY_MIN_LINES_PER_H_SIDE && rc >= XY_MIN_LINES_PER_H_SIDE {
+                    Some(((&left, lc), (&right, &right_bbox)))
+                } else if rc < XY_MIN_LINES_PER_H_SIDE && lc >= XY_MIN_LINES_PER_H_SIDE {
+                    Some(((&right, rc), (&left, &left_bbox)))
+                } else {
+                    None
+                };
+                thin_wide.is_some_and(|((thin, thin_lines), (wide, wide_bbox))| {
+                    thin_lines <= 1
+                        && column_cut_x(items, wide, wide_bbox, median_h, figures).is_some_and(
+                            |gx| {
+                                let (tx0, tx1) = x_extent(items, thin);
+                                tx0 < gx - 1.0 && tx1 > gx + 1.0
+                            },
+                        )
+                })
+            };
+            if (lc < XY_MIN_LINES_PER_H_SIDE || rc < XY_MIN_LINES_PER_H_SIDE) && !spanning_rescue {
+                if debug_xy {
+                    let pad = "  ".repeat(depth as usize);
+                    eprintln!(
+                        "[xy d={depth}]{pad}    -> min-lines fail (lc={lc} rc={rc}), try next"
+                    );
+                }
+                continue;
+            }
+        }
+
+        if debug_xy {
+            let pad = "  ".repeat(depth as usize);
+            eprintln!(
+                "[xy d={depth}]{pad} -> COMMIT {:?}@{:.1}",
+                cut.axis, cut.position
+            );
+        }
+        let left_region = xy_cut_rec(items, left, left_bbox, depth + 1, median_h, figures);
+        let right_region = xy_cut_rec(items, right, right_bbox, depth + 1, median_h, figures);
         return Region {
             bbox,
-            kind: RegionKind::Leaf { item_indices: idxs },
-        };
-    };
-
-    // Partition items by centroid. We use centroids rather than bbox edges so
-    // items that straddle the cut don't get arbitrarily assigned — they go to
-    // whichever side holds most of their ink.
-    let mut left: Vec<usize> = Vec::new();
-    let mut right: Vec<usize> = Vec::new();
-    for i in idxs {
-        let it = &items[i].item;
-        let centroid = match cut.axis {
-            CutAxis::Horizontal => it.y + it.height.max(0.0) * 0.5,
-            CutAxis::Vertical => it.x + it.width.max(0.0) * 0.5,
-        };
-        if centroid < cut.position {
-            left.push(i);
-        } else {
-            right.push(i);
-        }
-    }
-    if left.is_empty() || right.is_empty() {
-        let mut all = left;
-        all.extend(right);
-        return Region {
-            bbox,
-            kind: RegionKind::Leaf { item_indices: all },
+            kind: RegionKind::Split {
+                axis: cut.axis,
+                children: vec![left_region, right_region],
+            },
         };
     }
-    let (left_bbox, right_bbox) = xy_split_bbox(&bbox, &cut);
 
-    // Banner cuts (score = ∞) at the page root are explicitly meant to
-    // isolate single-line wide headers like titles, so skip the min-lines
-    // guard for them. At deeper recursion levels we keep the guard — an
-    // aggressive single-line banner cut mid-recursion fragments paragraphs
-    // around emphasized lines (e.g. a centered "Figure N caption" sandwiched
-    // between body paragraphs would otherwise carve out its own sliver
-    // region and break paragraph continuation).
-    let allow_single_line =
-        cut.axis == CutAxis::Horizontal && cut.score.is_infinite() && depth == 0;
-    if cut.axis == CutAxis::Horizontal && !allow_single_line {
-        let lc = xy_distinct_lines(items, &left, median_h);
-        let rc = xy_distinct_lines(items, &right, median_h);
-        // Rescue: a single wide spanning line (e.g. a centered authors /
-        // affiliation line above a two-column body) is worth isolating even
-        // mid-recursion when peeling it reveals the column gutter underneath.
-        // Otherwise the spanning line straddles the gutter, the V-cut can
-        // never fire, and the whole body interleaves column-by-column. The
-        // density H-cut that peels it has a finite score (the line is often
-        // just under the banner width threshold), so this is NOT gated on a
-        // banner cut. Discriminator vs. carving a single-column caption out of
-        // running prose: the thin side must be one line whose x-extent crosses
-        // the gutter revealed on the other (multi-line) side.
-        let spanning_rescue = {
-            let thin_wide = if lc < XY_MIN_LINES_PER_H_SIDE && rc >= XY_MIN_LINES_PER_H_SIDE {
-                Some(((&left, lc), (&right, &right_bbox)))
-            } else if rc < XY_MIN_LINES_PER_H_SIDE && lc >= XY_MIN_LINES_PER_H_SIDE {
-                Some(((&right, rc), (&left, &left_bbox)))
-            } else {
-                None
-            };
-            thin_wide.is_some_and(|((thin, thin_lines), (wide, wide_bbox))| {
-                thin_lines <= 1
-                    && column_cut_x(items, wide, wide_bbox, median_h, figures).is_some_and(|gx| {
-                        let (tx0, tx1) = x_extent(items, thin);
-                        tx0 < gx - 1.0 && tx1 > gx + 1.0
-                    })
-            })
-        };
-        if (lc < XY_MIN_LINES_PER_H_SIDE || rc < XY_MIN_LINES_PER_H_SIDE) && !spanning_rescue {
-            let mut all = left;
-            all.extend(right);
-            return Region {
-                bbox,
-                kind: RegionKind::Leaf { item_indices: all },
-            };
-        }
+    if debug_xy {
+        let pad = "  ".repeat(depth as usize);
+        eprintln!("[xy d={depth}]{pad} -> LEAF (no valid cut)");
     }
-
-    let left_region = xy_cut_rec(items, left, left_bbox, depth + 1, median_h, figures);
-    let right_region = xy_cut_rec(items, right, right_bbox, depth + 1, median_h, figures);
     Region {
         bbox,
-        kind: RegionKind::Split {
-            axis: cut.axis,
-            children: vec![left_region, right_region],
-        },
+        kind: RegionKind::Leaf { item_indices: idxs },
     }
 }
 

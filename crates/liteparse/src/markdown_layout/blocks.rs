@@ -98,6 +98,34 @@ pub fn render_blocks(blocks: &[Block]) -> String {
     let mut out = String::new();
     for (i, block) in blocks.iter().enumerate() {
         if i > 0 {
+            // A word hyphenated across a soft line wrap sometimes lands in two
+            // *separate* paragraph blocks (the classifier mis-split mid-word):
+            // `…they dis-` ‖ `lodged…`. When the previous block ends with
+            // `<letter>-` and this block is a plain paragraph beginning with a
+            // lowercase letter, splice them: drop the hyphen and join with no
+            // separator, healing both the word and the spurious break. The
+            // lowercase + plain-text gates keep real compounds (`well-` then a
+            // capitalized `Known`) and emphasised/heading/table starts intact.
+            if let (
+                Block::Paragraph { .. },
+                Block::Paragraph {
+                    text,
+                    bold: false,
+                    italic: false,
+                },
+            ) = (&blocks[i - 1], block)
+                && out.ends_with('-')
+                && out
+                    .chars()
+                    .rev()
+                    .nth(1)
+                    .is_some_and(|p| p.is_ascii_alphabetic())
+                && text.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+            {
+                out.pop();
+                out.push_str(text);
+                continue;
+            }
             // Consecutive list items render as a tight list (single newline).
             // Everything else gets a blank line between blocks.
             let tight = matches!(block, Block::ListItem { .. })
@@ -328,6 +356,24 @@ mod tests {
         }];
         let s = render_blocks(&blocks);
         assert_eq!(s, "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |");
+    }
+
+    #[test]
+    fn splices_hyphen_split_across_paragraph_blocks() {
+        let p = |t: &str| Block::Paragraph {
+            text: t.into(),
+            bold: false,
+            italic: false,
+        };
+        // Mid-word hyphen split into two paragraphs heals into one.
+        let s = render_blocks(&[p("they dis-"), p("lodged the part")]);
+        assert_eq!(s, "they dislodged the part");
+        // Capitalized continuation is a real compound break — left intact.
+        let s = render_blocks(&[p("the well-"), p("Known fact")]);
+        assert_eq!(s, "the well-\n\nKnown fact");
+        // Trailing dash not preceded by a letter doesn't splice.
+        let s = render_blocks(&[p("a -"), p("dash line")]);
+        assert_eq!(s, "a -\n\ndash line");
     }
 
     #[test]

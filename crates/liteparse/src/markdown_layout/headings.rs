@@ -31,6 +31,12 @@ pub(super) const FONT_SIZE_HEADING_TOLERANCE: f32 = 0.6;
 /// a bold body-size line longer than this is almost always a bold *sentence*
 /// inside a paragraph, not a heading.
 pub(super) const BOLD_HEADING_MAX_CHARS: usize = 80;
+/// Maximum length for a font-size-promoted heading. Looser than
+/// `BOLD_HEADING_MAX_CHARS` (which gates the bold-detection path) because
+/// genuine title lines can run long. Tight enough to reject footnotes
+/// and citations that score slightly above body size — those are
+/// multi-clause sentences that exceed any reasonable label length.
+pub(super) const HEADING_MAX_TEXT_CHARS: usize = 140;
 
 /// Recognize caption-prefix lines like "Figure 7", "Fig. 12.", "Table 3:",
 /// "Tab. 5", "Equation (4)" — these routinely render in a slightly distinct

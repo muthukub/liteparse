@@ -6,10 +6,26 @@ use super::inline::{SpanStyle, line_all_bold, line_uniform_style, render_line_in
 pub(super) const PARAGRAPH_GAP_MULTIPLIER: f32 = 1.5;
 
 /// Tolerance for treating two font sizes as "the same" when grouping
-/// paragraph lines. Generous because we sometimes derive the "size" from
-/// `bbox.height`, which varies a few points line-to-line based on whether
-/// the glyphs include descenders (`y`, `g`, `p`).
-pub(super) const FONT_SIZE_PARAGRAPH_TOLERANCE: f32 = 2.5;
+/// paragraph lines, when at least one side falls back to a bbox-height
+/// estimate. Set above descender-driven jitter (~1pt) but below a
+/// 12→14pt section-heading step that often follows a smaller caption
+/// line with the same bold style.
+pub(super) const FONT_SIZE_PARAGRAPH_TOLERANCE: f32 = 1.5;
+/// Tolerance when both lines report real Tf-set sizes. Tight, so a
+/// 12pt-bold caption line directly above a 14pt-bold section heading
+/// doesn't accidentally merge them into a single paragraph that swallows
+/// the heading.
+pub(super) const FONT_SIZE_PARAGRAPH_TOLERANCE_REAL: f32 = 0.5;
+
+/// Pick the right size-equality tolerance depending on whether either
+/// side has an estimated (jitter-prone) font size.
+pub(super) fn font_size_paragraph_tolerance(prev: &ProjectedLine, cur: &ProjectedLine) -> f32 {
+    if prev.font_size_is_estimated || cur.font_size_is_estimated {
+        FONT_SIZE_PARAGRAPH_TOLERANCE
+    } else {
+        FONT_SIZE_PARAGRAPH_TOLERANCE_REAL
+    }
+}
 
 /// Tolerance in points for treating two indent positions as "the same column".
 pub(super) const INDENT_TOLERANCE: f32 = 6.0;
@@ -63,6 +79,42 @@ pub(super) fn dehyphenate_join(prev: &mut String, check: &str, to_append: &str) 
     }
 }
 
+/// Decide whether `cur` is a wrapped continuation of a heading line `prev`.
+/// Looser than `continues_paragraph`: drops the indent-shift check, because
+/// a centered wrapped heading has shifting left edges by line (the second
+/// line is shorter, so its left edge is further right than the first), and
+/// the projection's anchor classifier often labels short heading lines as
+/// `Anchor::Left` rather than `Anchor::Center` since they don't anchor to a
+/// column-center cluster. Without this relaxation, multi-line wrapped
+/// headings like `# Author's Note to the` + `# 2021 Edition` fail the
+/// merge check and emit as two separate `#` blocks.
+pub(super) fn continues_heading(prev: &ProjectedLine, cur: &ProjectedLine) -> bool {
+    let centered_mismatch = (prev.anchor == Anchor::Center) ^ (cur.anchor == Anchor::Center);
+    if centered_mismatch {
+        return false;
+    }
+    if (prev.dominant_font_size - cur.dominant_font_size).abs()
+        > font_size_paragraph_tolerance(prev, cur)
+    {
+        return false;
+    }
+    if let (Some(p), Some(c)) = (line_uniform_style(prev), line_uniform_style(cur))
+        && p.bold != c.bold
+    {
+        return false;
+    }
+    if line_all_bold(prev) != line_all_bold(cur) {
+        return false;
+    }
+    if prev.region_path != cur.region_path {
+        return false;
+    }
+    let prev_bottom = prev.bbox.y + prev.bbox.height;
+    let gap = cur.bbox.y - prev_bottom;
+    let line_height = prev.bbox.height.max(cur.bbox.height).max(1.0);
+    gap <= line_height * PARAGRAPH_GAP_MULTIPLIER
+}
+
 /// Decide whether `cur` continues the paragraph started by `prev`.
 pub(super) fn continues_paragraph(prev: &ProjectedLine, cur: &ProjectedLine) -> bool {
     // Anchor only signals a paragraph break when one of the lines is clearly
@@ -73,7 +125,9 @@ pub(super) fn continues_paragraph(prev: &ProjectedLine, cur: &ProjectedLine) -> 
     if centered_mismatch {
         return false;
     }
-    if (prev.dominant_font_size - cur.dominant_font_size).abs() > FONT_SIZE_PARAGRAPH_TOLERANCE {
+    if (prev.dominant_font_size - cur.dominant_font_size).abs()
+        > font_size_paragraph_tolerance(prev, cur)
+    {
         return false;
     }
     // Uniform-bold ↔ non-bold transition is a paragraph break. Catches

@@ -355,6 +355,20 @@ fn rectf_to_rect(r: &RectF) -> Rect {
     }
 }
 
+/// Fold typographic punctuation to its ASCII equivalent so extracted text
+/// matches plain-ASCII transcriptions: curly quotes → `'`/`"`, the dash family
+/// (en/em/figure/non-breaking/minus) → `-`. Applied to every decoded character
+/// at extraction time so all output formats are consistent.
+fn normalize_punct(c: char) -> char {
+    match c {
+        '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{2032}' => '\'',
+        '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{2033}' => '"',
+        '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
+        | '\u{2212}' => '-',
+        _ => c,
+    }
+}
+
 /// Character-level text extraction.
 ///
 /// Instead of using PDFium's rect API (which splits text at every font attribute
@@ -381,6 +395,7 @@ fn extract_page_text_items(
     const MAX_INLINE_GAP: f32 = 15.0;
 
     let debug = std::env::var("LITEPARSE_DEBUG").is_ok();
+    let dbg_gaps = std::env::var("LITEPARSE_DEBUG_GAPS").is_ok();
 
     // Pre-scan: check if ALL text on this page is invisible (render mode 3).
     // Some scanned PDFs have an invisible OCR text layer as the only text.
@@ -442,6 +457,7 @@ fn extract_page_text_items(
                 }
             },
         };
+        let c = normalize_punct(c);
 
         // Newlines: flush the current segment
         if c == '\n' || c == '\r' {
@@ -540,6 +556,27 @@ fn extract_page_text_items(
                 c == '.' && seg.has_non_dot_content() && gap > seg.avg_char_width() * 0.4
             };
 
+            if dbg_gaps && y_overlap && !line_changed && gap > 0.0 {
+                let fs = if seg.font_size > 0.0 {
+                    seg.font_size
+                } else {
+                    seg.vp_bottom - seg.vp_top
+                };
+                let split = gap >= MAX_INLINE_GAP
+                    || (seg.pending_space && gap > seg.avg_char_width() * 2.2);
+                eprintln!(
+                    "[gap] {} gap={:.2} fs={:.2} g/fs={:.2} avgcw={:.2} g/cw={:.2} ps={} -> after='{:.20}' next='{}'",
+                    if split { "SPLIT" } else { "merge" },
+                    gap,
+                    fs,
+                    if fs > 0.0 { gap / fs } else { 0.0 },
+                    seg.avg_char_width(),
+                    gap / seg.avg_char_width().max(0.1),
+                    seg.pending_space as u8,
+                    seg.text,
+                    c,
+                );
+            }
             if !y_overlap || line_changed || gap >= MAX_INLINE_GAP || dot_leader_break {
                 seg.flush(&mut items);
                 seg.start(c, &vp_loose, &vp_strict, &ch, page_rotation);

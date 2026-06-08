@@ -2,15 +2,18 @@ use crate::types::{OutlineTarget, ParsedPage, ProjectedLine};
 
 use super::blocks::{Block, paragraph_from_accum};
 use super::headings::{
-    MAX_HEADING_LEVELS, heading_level_for, is_caption_line, is_toc_title, looks_like_bold_heading,
-    looks_like_numbered_bold_heading, outline_heading_level, page_is_toc, struct_heading_level,
+    HEADING_MAX_TEXT_CHARS, MAX_HEADING_LEVELS, heading_level_for, is_caption_line, is_toc_title,
+    looks_like_bold_heading, looks_like_numbered_bold_heading, outline_heading_level, page_is_toc,
+    struct_heading_level,
 };
 use super::hr::detect_horizontal_rules;
 use super::inline::{
     append_inline_continuation, line_uniform_style, render_line_inline, render_list_item_text,
 };
 use super::lists::{LIST_INDENT_STEP_PT, parse_list_marker};
-use super::paragraphs::{ParaAccum, append_to_paragraph, collapse_whitespace, continues_paragraph};
+use super::paragraphs::{
+    ParaAccum, append_to_paragraph, collapse_whitespace, continues_heading, continues_paragraph,
+};
 use super::repetition::is_header_or_footer;
 use super::tables::{detect_ruled_tables, detect_tables, merge_table_runs};
 
@@ -337,6 +340,15 @@ pub fn classify_page_with_filters(
                 .or(last_list_line.map(|i| &lines[i]));
             !(starts_lower && prev.is_some_and(|p| continues_paragraph(p, line)))
         });
+        // Long-text guard: a real heading is a label, not a sentence with
+        // multiple clauses. Footnotes / citations / captions that happen to
+        // be set slightly larger than body text (e.g. a 10.7pt citation
+        // over a 9pt body) score as the smallest heading level in the size
+        // map; without a length cap they emit as `##`-shaped sentences.
+        // Threshold is generous — book titles and long subsection labels
+        // can run 100+ chars — but a 200-char citation is unambiguously
+        // not a heading.
+        let size_level = size_level.filter(|_| text.chars().count() <= HEADING_MAX_TEXT_CHARS);
         // A standalone "Contents" / "Table of Contents" / "Index" line is
         // almost always a real H1, even when `page_is_toc` is false — many
         // TOCs list entries without inline trailing page numbers, so the
@@ -347,6 +359,7 @@ pub fn classify_page_with_filters(
             .or(size_level)
             .or(toc_title_level)
             .map(|l| l.clamp(1, MAX_HEADING_LEVELS as u8));
+        let mut demoted_heading = false;
         if let Some(level) = level {
             // Merge a wrapped continuation into the heading directly above when
             // it flows as one block: same level, the heading is still the last
@@ -355,27 +368,52 @@ pub fn classify_page_with_filters(
             // so only a genuinely multi-line heading/caption merges here.
             if let Some((run_level, run_idx)) = heading_run.as_ref()
                 && *run_level == level
-                && continues_paragraph(&lines[*run_idx], line)
+                && continues_heading(&lines[*run_idx], line)
                 && let Some(Block::Heading {
                     level: last_level,
                     text: htext,
                 }) = blocks.last_mut()
                 && *last_level == level
             {
-                append_inline_continuation(htext, text, &collapse_whitespace(text));
+                // Length guard: a wrapped multi-line heading is fine, but a
+                // run that grows past `HEADING_MAX_TEXT_CHARS` is almost
+                // certainly a footnote/citation block whose font is only
+                // slightly above body (e.g. 10.7pt over 9pt body). Demote
+                // the existing heading block back to a paragraph and let
+                // the current line continue that paragraph below. The
+                // first line scored as a solo heading because it was under
+                // the limit on its own; only the second-or-later line tips
+                // the cumulative content into footnote territory.
+                let combined_chars = htext.chars().count() + 1 + text.chars().count();
+                if combined_chars > HEADING_MAX_TEXT_CHARS {
+                    let demoted = std::mem::take(htext);
+                    blocks.pop();
+                    paragraph = Some(ParaAccum {
+                        raw: demoted.clone(),
+                        inline: demoted,
+                        last: lines[*run_idx].clone(),
+                        uniform: None,
+                    });
+                    heading_run = None;
+                    demoted_heading = true;
+                } else {
+                    append_inline_continuation(htext, text, &collapse_whitespace(text));
+                    heading_run = Some((level, line_idx));
+                    continue;
+                }
+            }
+            if !demoted_heading {
+                flush_paragraph(&mut blocks, paragraph.take());
+                list_base_indent = None;
+                last_list_item_idx = None;
+                last_list_line = None;
+                blocks.push(Block::Heading {
+                    level,
+                    text: collapse_whitespace(text),
+                });
                 heading_run = Some((level, line_idx));
                 continue;
             }
-            flush_paragraph(&mut blocks, paragraph.take());
-            list_base_indent = None;
-            last_list_item_idx = None;
-            last_list_line = None;
-            blocks.push(Block::Heading {
-                level,
-                text: collapse_whitespace(text),
-            });
-            heading_run = Some((level, line_idx));
-            continue;
         }
 
         // List item?
