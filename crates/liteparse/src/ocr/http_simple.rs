@@ -14,6 +14,11 @@ pub struct HttpOcrResponseItem {
     text: String,
     bbox: [f32; 4],
     confidence: f32,
+    /// Optional 4-point polygon [[x,y]×4] of the (possibly rotated) detection,
+    /// ordered top-left → top-right → bottom-right → bottom-left in the
+    /// glyphs' upright reading frame.
+    #[serde(default)]
+    polygon: Option<[[f32; 2]; 4]>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -82,6 +87,7 @@ impl OcrEngine for HttpOcrEngine {
                 .timeout(Duration::from_millis(60000))
                 .send()
                 .await?
+                .error_for_status()?
                 .json()
                 .await?;
 
@@ -92,6 +98,7 @@ impl OcrEngine for HttpOcrEngine {
                     text: i.text.clone(),
                     bbox: i.bbox,
                     confidence: i.confidence,
+                    polygon: i.polygon,
                 })
                 .collect();
 

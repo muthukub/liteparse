@@ -2,6 +2,7 @@ use crate::error::LiteParseError;
 use crate::extract::load_document_from_input;
 use crate::types::PdfInput;
 use image::ImageEncoder;
+use pdfium::Library;
 use serde::Serialize;
 
 /// A single rendered page as PNG bytes.
@@ -14,13 +15,19 @@ pub struct RenderedPage {
 }
 
 /// Render selected pages from a PDF input to PNG bytes.
+///
+/// Acquires the process-global PDFium lock for the entire render. The lock
+/// is held until this function returns — PNG encoding happens inside the
+/// critical section, which is fine because it is pure CPU work with no
+/// `.await` points.
 pub fn render_pages_to_png(
     input: &PdfInput,
     page_numbers: Option<&[u32]>,
     dpi: f32,
     password: Option<&str>,
 ) -> Result<Vec<RenderedPage>, LiteParseError> {
-    let document = load_document_from_input(input, password)?;
+    let lib = Library::init();
+    let document = load_document_from_input(&lib, input, password)?;
     render_document_pages(&document, page_numbers, dpi)
 }
 
@@ -103,7 +110,8 @@ struct ImageBoundsOutput {
 
 /// Extract image bounding boxes and print as JSON to stdout.
 pub fn image_bounds(pdf_path: &str, page_num: Option<u32>) -> Result<(), LiteParseError> {
-    let document = load_document_from_input(&PdfInput::Path(pdf_path.to_string()), None)?;
+    let lib = Library::init();
+    let document = load_document_from_input(&lib, &PdfInput::Path(pdf_path.to_string()), None)?;
     let page_count = document.page_count();
 
     for page_index in 0..page_count {

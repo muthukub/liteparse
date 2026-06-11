@@ -41,6 +41,11 @@ pub struct TextItem {
     /// Whether the font has buggy encoding (private-use codepoints, TT subset, etc.)
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub font_is_buggy: bool,
+    /// Whether most characters in this item could not be mapped to Unicode
+    /// (e.g. a Type3 font with no ToUnicode map). The text content is
+    /// PDFium's char-code fallback and does not reflect the rendered glyphs.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub has_unicode_map_error: bool,
     /// Marked content ID from the PDF structure tree.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcid: Option<i32>,

@@ -13,6 +13,12 @@ pub struct OcrResult {
     pub bbox: [f32; 4],
     /// Confidence score in 0.0–1.0 range.
     pub confidence: f32,
+    /// Optional 4-point polygon of the (possibly rotated) detection,
+    /// ordered top-left → top-right → bottom-right → bottom-left in the
+    /// glyphs' upright reading frame. When present, allows the projector
+    /// to recover orientation for rotated text. None for axis-aligned-only
+    /// engines (e.g. Tesseract word boxes).
+    pub polygon: Option<[[f32; 2]; 4]>,
 }
 
 pub struct OcrOptions {
@@ -87,6 +93,7 @@ mod tests {
                     text: format!("lang={}", options.language),
                     bbox: [0.0, 0.0, 10.0, 10.0],
                     confidence: 0.9,
+                    polygon: None,
                 }])
             })
         }

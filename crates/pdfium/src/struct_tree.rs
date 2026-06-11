@@ -31,7 +31,7 @@ pub struct StructNode {
     pub alt_text: Option<String>,
 }
 
-impl Page<'_> {
+impl Page<'_, '_> {
     /// Walk this page's structure tree (tagged-PDF tree). Returns an empty
     /// vec when the page is untagged or the document has no struct tree.
     /// Nodes are returned in pre-order (parent before children).
@@ -60,7 +60,10 @@ impl Page<'_> {
 
 /// Pre-scan all page objects on the page, building `mcid → union(bbox)` in
 /// viewport space. Each struct node then unions the bboxes for its own mcids.
-fn collect_mcid_bboxes(page: &Page<'_>, view_box: &RectF) -> std::collections::HashMap<i32, RectF> {
+fn collect_mcid_bboxes(
+    page: &Page<'_, '_>,
+    view_box: &RectF,
+) -> std::collections::HashMap<i32, RectF> {
     let vp = page.viewport_transform(view_box);
     let obj_count = unsafe { ffi!(FPDFPage_CountObjects(page.handle)) };
     let mut map: std::collections::HashMap<i32, RectF> = std::collections::HashMap::new();

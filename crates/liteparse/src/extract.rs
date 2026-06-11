@@ -8,11 +8,16 @@ use crate::types::{
 use pdfium::{Document, Font, FontType, Library, Page, PathObject, RectF, SegmentKind, TextPage};
 
 /// Open a PDF from path or bytes with an optional password.
-pub(crate) fn load_document_from_input(
+///
+/// The returned [`Document`] borrows from the provided [`Library`], which
+/// holds the process-global PDFium lock. The lock is released when the
+/// `Library` is dropped, so callers must keep `lib` alive for as long as any
+/// `Document` / `Page` / `TextPage` etc. derived from it is in use.
+pub(crate) fn load_document_from_input<'lib>(
+    lib: &'lib Library,
     input: &PdfInput,
     password: Option<&str>,
-) -> Result<Document, LiteParseError> {
-    let lib = Library::init();
+) -> Result<Document<'lib>, LiteParseError> {
     match input {
         PdfInput::Path(path) => Ok(lib.load_document(path, password)?),
         PdfInput::Bytes(data) => Ok(lib.load_document_from_bytes(data, password)?),
@@ -20,13 +25,19 @@ pub(crate) fn load_document_from_input(
 }
 
 /// Extract pages from a `PdfInput` (file path or bytes) with filtering.
+///
+/// This convenience entry point acquires the PDFium lock internally for the
+/// full extraction. Callers that already hold a [`Library`] (e.g. because
+/// they're also rendering bitmaps in the same critical section) should call
+/// [`extract_pages_from_document`] directly.
 pub fn extract_pages_from_input(
     input: &PdfInput,
     target_pages: Option<&[u32]>,
     max_pages: usize,
     password: Option<&str>,
 ) -> Result<Vec<LitePage>, LiteParseError> {
-    let document = load_document_from_input(input, password)?;
+    let lib = Library::init();
+    let document = load_document_from_input(&lib, input, password)?;
     extract_pages_from_document(&document, target_pages, max_pages)
 }
 
@@ -1126,6 +1137,9 @@ struct SegmentBuilder {
     last_char_bottom: f32,
     // Count of non-space characters (for avg width calculation)
     char_count: usize,
+    // Count of characters whose Unicode came from PDFium's char-code fallback
+    // (no usable ToUnicode / glyph-name mapping, e.g. Type3 fonts).
+    unmapped_char_count: usize,
     // Font metadata (captured from the first character)
     font_name: Option<String>,
     font_size: f32,
@@ -1158,6 +1172,7 @@ impl SegmentBuilder {
             last_char_loose_right: f32::MIN,
             last_char_bottom: f32::MIN,
             char_count: 0,
+            unmapped_char_count: 0,
             font_name: None,
             font_size: 0.0,
             font_height: None,
@@ -1212,6 +1227,7 @@ impl SegmentBuilder {
         self.last_char_loose_right = vp_loose.right;
         self.last_char_bottom = vp_strict.bottom;
         self.char_count = 1;
+        self.unmapped_char_count = if ch.has_unicode_map_error() { 1 } else { 0 };
         self.has_content = true;
         self.pending_space = false;
         self.text_width = 0.0;
@@ -1306,6 +1322,9 @@ impl SegmentBuilder {
         self.last_char_loose_right = vp_loose.right;
         self.last_char_bottom = vp_strict.bottom;
         self.char_count += 1;
+        if ch.has_unicode_map_error() {
+            self.unmapped_char_count += 1;
+        }
 
         // Accumulate glyph width
         if let Some(ref font) = self.font {
@@ -1391,6 +1410,9 @@ impl SegmentBuilder {
                     None
                 },
                 font_is_buggy: self.font_is_buggy,
+                // Majority vote: a stray mapped char (e.g. a space) inside an
+                // otherwise unmappable Type3 run must not rescue the item.
+                has_unicode_map_error: self.unmapped_char_count * 2 >= self.char_count.max(1),
                 mcid: self.mcid,
                 fill_color: self.fill_color.clone(),
                 stroke_color: self.stroke_color.clone(),

@@ -51,13 +51,18 @@ pub struct PathObject {
     pub segments: Vec<PathSegment>,
 }
 
-pub struct Page<'doc> {
+/// A loaded page within a [`Document`].
+///
+/// The `'doc` lifetime ties the page to its owning document; `'lib` carries
+/// the PDFium-lock lifetime through, ensuring no PDFium calls can occur
+/// after the lock is released.
+pub struct Page<'doc, 'lib: 'doc> {
     pub(crate) handle: pdfium_sys::FPDF_PAGE,
     pub(crate) doc_handle: pdfium_sys::FPDF_DOCUMENT,
-    pub(crate) _doc: PhantomData<&'doc Document>,
+    pub(crate) _doc: PhantomData<&'doc Document<'lib>>,
 }
 
-impl Page<'_> {
+impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
     pub fn width(&self) -> f32 {
         unsafe { ffi!(FPDF_GetPageWidthF(self.handle)) }
     }
@@ -141,7 +146,7 @@ impl Page<'_> {
         }
     }
 
-    pub fn text(&self) -> Result<TextPage<'_>, PdfiumError> {
+    pub fn text(&self) -> Result<TextPage<'_, 'lib>, PdfiumError> {
         let handle = unsafe { ffi!(FPDFText_LoadPage(self.handle)) };
         if handle.is_null() {
             return Err(PdfiumError::OperationFailed);
@@ -153,12 +158,15 @@ impl Page<'_> {
     }
 
     /// Render the page to a BGRA bitmap at the given DPI.
-    pub fn render(&self, dpi: f32) -> Result<Bitmap, PdfiumError> {
+    pub fn render(&self, dpi: f32) -> Result<Bitmap<'lib>, PdfiumError> {
         let scale = dpi / 72.0;
         let width = (self.width() * scale).round() as i32;
         let height = (self.height() * scale).round() as i32;
 
-        let bitmap = Bitmap::new(width, height)?;
+        // SAFETY: this method is on `Page<'_, 'lib>`, whose existence proves
+        // the PDFium lock is held for `'lib`; the returned `Bitmap<'lib>` is
+        // tied to that same lock lifetime.
+        let bitmap = unsafe { Bitmap::new(width, height) }?;
 
         // Fill with white (ARGB: 0xFFFFFFFF)
         bitmap.fill_rect(0, 0, width, height, 0xFFFFFFFF);
@@ -241,9 +249,42 @@ impl Page<'_> {
         results
     }
 
+    /// Extract bounding boxes of filled vector path objects on this page,
+    /// recursing into form XObjects (with each form's transform applied).
+    /// Returns coordinates in viewport space (Y-down, top-left origin) in PDF
+    /// points. Stroke-only paths (rules, borders) are skipped, as are paths
+    /// smaller than `min_size_pt` in either dimension and paths covering more
+    /// than `max_page_coverage` fraction of the page in both dimensions
+    /// (full-page background rects).
+    pub fn filled_path_bounds(&self, min_size_pt: f32, max_page_coverage: f32) -> Vec<ImageBounds> {
+        let page_width = self.width();
+        let page_height = self.height();
+        let obj_count = unsafe { ffi!(FPDFPage_CountObjects(self.handle)) };
+        let mut results = Vec::new();
+
+        for i in 0..obj_count {
+            let obj = unsafe { ffi!(FPDFPage_GetObject(self.handle, i)) };
+            if obj.is_null() {
+                continue;
+            }
+            collect_filled_paths(
+                obj,
+                None,
+                page_width,
+                page_height,
+                min_size_pt,
+                max_page_coverage,
+                0,
+                &mut results,
+            );
+        }
+
+        results
+    }
+
     /// Get the rendered bitmap of a specific embedded image object by index.
     /// The index corresponds to the order from iterating page objects (image objects only).
-    pub fn render_image_object(&self, image_obj_index: usize) -> Result<Bitmap, PdfiumError> {
+    pub fn render_image_object(&self, image_obj_index: usize) -> Result<Bitmap<'lib>, PdfiumError> {
         let obj_count = unsafe { ffi!(FPDFPage_CountObjects(self.handle)) };
         let mut image_idx = 0usize;
 
@@ -498,6 +539,173 @@ where
     })
 }
 
+/// Recursion limit for nested form XObjects in `filled_path_bounds`.
+const MAX_FORM_DEPTH: u32 = 4;
+
+/// Compose two FS_MATRIX transforms: the result applies `inner` first,
+/// then `outer` (i.e. `outer ∘ inner`).
+fn compose_matrices(
+    outer: &pdfium_sys::FS_MATRIX,
+    inner: &pdfium_sys::FS_MATRIX,
+) -> pdfium_sys::FS_MATRIX {
+    pdfium_sys::FS_MATRIX {
+        a: outer.a * inner.a + outer.c * inner.b,
+        b: outer.b * inner.a + outer.d * inner.b,
+        c: outer.a * inner.c + outer.c * inner.d,
+        d: outer.b * inner.c + outer.d * inner.d,
+        e: outer.a * inner.e + outer.c * inner.f + outer.e,
+        f: outer.b * inner.e + outer.d * inner.f + outer.f,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_filled_paths(
+    obj: pdfium_sys::FPDF_PAGEOBJECT,
+    transform: Option<&pdfium_sys::FS_MATRIX>,
+    page_width: f32,
+    page_height: f32,
+    min_size_pt: f32,
+    max_page_coverage: f32,
+    depth: u32,
+    out: &mut Vec<ImageBounds>,
+) {
+    let obj_type = unsafe { ffi!(FPDFPageObj_GetType(obj)) };
+
+    if obj_type == pdfium_sys::FPDF_PAGEOBJ_FORM as i32 {
+        if depth >= MAX_FORM_DEPTH {
+            return;
+        }
+        // Child bounds are reported in the form's coordinate space, so the
+        // form matrix (composed with any outer form transforms) must be
+        // applied to map them into page space.
+        let mut m = pdfium_sys::FS_MATRIX {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 0.0,
+            f: 0.0,
+        };
+        let has_m = unsafe { ffi!(FPDFPageObj_GetMatrix(obj, &mut m)) } != 0;
+        let combined = match (transform, has_m) {
+            (Some(outer), true) => Some(compose_matrices(outer, &m)),
+            (Some(outer), false) => Some(*outer),
+            (None, true) => Some(m),
+            (None, false) => None,
+        };
+
+        let child_count = unsafe { ffi!(FPDFFormObj_CountObjects(obj)) };
+        for i in 0..child_count {
+            let child = unsafe { ffi!(FPDFFormObj_GetObject(obj, i as std::os::raw::c_ulong)) };
+            if child.is_null() {
+                continue;
+            }
+            collect_filled_paths(
+                child,
+                combined.as_ref(),
+                page_width,
+                page_height,
+                min_size_pt,
+                max_page_coverage,
+                depth + 1,
+                out,
+            );
+        }
+        return;
+    }
+
+    if obj_type != pdfium_sys::FPDF_PAGEOBJ_PATH as i32 {
+        return;
+    }
+
+    // Only filled paths can be glyph outlines; skip stroke-only paths
+    // (table borders, rules, underlines).
+    let mut fill_mode: std::os::raw::c_int = 0;
+    let mut stroke: pdfium_sys::FPDF_BOOL = 0;
+    let ok = unsafe { ffi!(FPDFPath_GetDrawMode(obj, &mut fill_mode, &mut stroke)) };
+    if ok == 0 || fill_mode == pdfium_sys::FPDF_FILLMODE_NONE as i32 {
+        return;
+    }
+
+    // Skip light or transparent fills: glyph outlines are drawn in ink-like
+    // (dark, opaque) colors, while table zebra striping and section shading
+    // use light pastels. Light-on-dark text still gets caught because the
+    // dark background rect itself is a dark filled path. Paths whose fill
+    // color can't be read (pattern/shading fills) are kept conservatively.
+    let mut r: std::os::raw::c_uint = 0;
+    let mut g: std::os::raw::c_uint = 0;
+    let mut b: std::os::raw::c_uint = 0;
+    let mut a: std::os::raw::c_uint = 0;
+    let ok = unsafe {
+        ffi!(FPDFPageObj_GetFillColor(
+            obj, &mut r, &mut g, &mut b, &mut a
+        ))
+    };
+    if ok != 0 {
+        if a < 128 {
+            return;
+        }
+        let luminance = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+        if luminance > 140.0 {
+            return;
+        }
+    }
+
+    let mut left: f32 = 0.0;
+    let mut bottom: f32 = 0.0;
+    let mut right: f32 = 0.0;
+    let mut top: f32 = 0.0;
+    let ok = unsafe {
+        ffi!(FPDFPageObj_GetBounds(
+            obj,
+            &mut left,
+            &mut bottom,
+            &mut right,
+            &mut top
+        ))
+    };
+    if ok == 0 {
+        return;
+    }
+
+    if let Some(m) = transform {
+        let corners = [(left, bottom), (right, bottom), (left, top), (right, top)];
+        let mut min_x = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for (x, y) in corners {
+            let tx = m.a * x + m.c * y + m.e;
+            let ty = m.b * x + m.d * y + m.f;
+            min_x = min_x.min(tx);
+            max_x = max_x.max(tx);
+            min_y = min_y.min(ty);
+            max_y = max_y.max(ty);
+        }
+        left = min_x;
+        right = max_x;
+        bottom = min_y;
+        top = max_y;
+    }
+
+    let w = right - left;
+    let h = top - bottom;
+
+    if w < min_size_pt || h < min_size_pt {
+        return;
+    }
+    if w > page_width * max_page_coverage && h > page_height * max_page_coverage {
+        return;
+    }
+
+    out.push(ImageBounds {
+        x: left,
+        y: page_height - top,
+        width: w,
+        height: h,
+    });
+}
+
 /// Pre-computed affine transform from PDF page space to viewport space.
 /// Avoids repeated FFI calls to `FPDF_PageToDevice` by probing 3 points
 /// once and deriving the 6 affine coefficients.
@@ -535,7 +743,7 @@ impl ViewportTransform {
     }
 }
 
-impl Page<'_> {
+impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
     /// Build a `ViewportTransform` by probing 3 points through PDFium.
     /// This makes 3 FFI calls total, after which all transforms are pure math.
     pub fn viewport_transform(&self, view_box: &RectF) -> ViewportTransform {
@@ -554,7 +762,7 @@ impl Page<'_> {
     }
 }
 
-impl Drop for Page<'_> {
+impl Drop for Page<'_, '_> {
     fn drop(&mut self) {
         unsafe { ffi!(FPDF_ClosePage(self.handle)) };
     }

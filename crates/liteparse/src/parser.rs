@@ -14,6 +14,7 @@ use crate::projection;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::render;
 use crate::types::{ExtractedImage, OutlineTarget, ParsedPage, PdfInput};
+use pdfium::Library;
 
 /// Result of parsing a document.
 pub struct ParseResult {
@@ -41,6 +42,20 @@ pub struct ScreenshotResult {
 }
 
 /// Main LiteParse orchestrator.
+///
+/// ### Thread safety
+///
+/// `LiteParse` is `Send + Sync` and safe to share across threads (e.g.
+/// behind an `Arc`, or used concurrently from a multi-threaded `tokio`
+/// runtime).
+///
+/// PDFium itself is **not** thread-safe, so all PDFium FFI work — document
+/// loading, page rendering, text extraction — is serialized through a
+/// process-global lock held by [`pdfium::Library`]. From a caller's
+/// perspective, this means concurrent `parse_*` / `screenshot*` calls are
+/// safe but their PDFium portions run sequentially. The OCR pass and grid
+/// projection (which dominate runtime for OCR-heavy documents) run outside
+/// the lock and remain fully concurrent.
 pub struct LiteParse {
     config: LiteParseConfig,
     /// Optional caller-provided OCR engine. When set, this overrides the
@@ -107,12 +122,15 @@ impl LiteParse {
             .map_err(|e| format!("invalid --target-pages: {}", e))?;
 
         // Extract text (and pre-render OCR pages in one PDF load when OCR is on).
-        // The Document handle isn't Send, so we open it, pull every bit of
-        // document-level state we need, and drop it before any `.await`.
+        // The PDFium lock is acquired for this entire critical section and
+        // released before any `.await` below — OCR (network / CPU) and grid
+        // projection (pure Rust) do not touch PDFium, so they can run
+        // concurrently with other `LiteParse` calls.
         let password = self.config.password.as_deref();
         let render_images = matches!(self.config.image_mode, crate::config::ImageMode::Embed);
         let (pages, ocr_rendered, outline, images) = {
-            let document = extract::load_document_from_input(&validated_input, password)?;
+            let lib = Library::init();
+            let document = extract::load_document_from_input(&lib, &validated_input, password)?;
             let outline = extract::extract_outline(&document);
             let (pages, images) = extract::extract_pages_and_images(
                 &document,
@@ -140,6 +158,7 @@ impl LiteParse {
             } else {
                 Vec::new()
             };
+            // `lib` is dropped here, releasing the PDFium lock.
             (pages, rendered, outline, images)
         };
         let mut pages = pages;

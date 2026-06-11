@@ -174,3 +174,54 @@ async fn test_parse_bytes_pdf_integration() {
         .expect("Should be able to parse");
     assert_eq!(parsed.pages.len(), 1);
 }
+
+/// Stress test: many concurrent `parse_input` calls on a multi-threaded
+/// tokio runtime through a single `Arc<LiteParse>`. Before the PDFium
+/// process-global lock was introduced, this scenario caused malloc
+/// double-free / heap corruption because PDFium FFI is not thread-safe.
+///
+/// We intentionally do **not** use `#[serial]` here — this test must run
+/// concurrently with itself (across tasks within the test) to exercise the
+/// lock. Other tests in this file are `#[serial]` so they won't race.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_concurrent_parse_does_not_crash() {
+    use std::sync::Arc;
+    use tokio::task::JoinSet;
+
+    let env_var = std::env::var("SKIP_INTEGRATION_TESTS");
+    if let Ok(v) = env_var
+        && v == "yes"
+    {
+        return;
+    }
+
+    let lit = Arc::new(LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        quiet: true,
+        ..LiteParseConfig::default()
+    }));
+
+    let bytes = tokio::fs::read("../../integration_tests_data/sample.pdf")
+        .await
+        .expect("fixture exists");
+
+    let mut set: JoinSet<usize> = JoinSet::new();
+    for _ in 0..16 {
+        let lit = lit.clone();
+        let bytes = bytes.clone();
+        set.spawn(async move {
+            let parsed = lit
+                .parse_input(PdfInput::Bytes(bytes))
+                .await
+                .expect("parse should succeed");
+            parsed.pages.len()
+        });
+    }
+
+    let mut total = 0;
+    while let Some(joined) = set.join_next().await {
+        total += joined.expect("task panicked");
+    }
+    // 16 tasks × 1 page each
+    assert_eq!(total, 16);
+}

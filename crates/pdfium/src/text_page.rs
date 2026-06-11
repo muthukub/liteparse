@@ -4,12 +4,16 @@ use crate::ffi;
 use crate::page::Page;
 use crate::types::{CharBox, Color, Matrix, RectF, TextRect};
 
-pub struct TextPage<'page> {
+/// Extracted text content of a [`Page`].
+///
+/// `'page` is the borrow of the parent page; `'lib` carries the PDFium-lock
+/// lifetime through so that no FFI call can occur after the lock is released.
+pub struct TextPage<'page, 'lib: 'page> {
     pub(crate) handle: pdfium_sys::FPDF_TEXTPAGE,
-    pub(crate) _page: PhantomData<&'page Page<'page>>,
+    pub(crate) _page: PhantomData<&'page Page<'page, 'lib>>,
 }
 
-impl TextPage<'_> {
+impl<'page, 'lib: 'page> TextPage<'page, 'lib> {
     pub fn char_count(&self) -> i32 {
         unsafe { ffi!(FPDFText_CountChars(self.handle)) }
     }
@@ -150,7 +154,7 @@ impl TextPage<'_> {
     }
 }
 
-impl Drop for TextPage<'_> {
+impl Drop for TextPage<'_, '_> {
     fn drop(&mut self) {
         unsafe { ffi!(FPDFText_ClosePage(self.handle)) };
     }
@@ -159,7 +163,12 @@ impl Drop for TextPage<'_> {
 // -- TextChar: zero-cost view into a TextPage --
 
 pub struct TextChar<'tp> {
-    text_page: &'tp TextPage<'tp>,
+    // We don't care about the inner lifetimes here — we only need to know
+    // that we're borrowing the text page (and transitively the library lock)
+    // for at least `'tp`. Using `'tp` for the inner params makes the type
+    // covariant in `'tp` and lets borrow-checking flow naturally from the
+    // outer borrow.
+    text_page: &'tp TextPage<'tp, 'tp>,
     pub(crate) index: i32,
 }
 
@@ -417,7 +426,7 @@ impl TextChar<'_> {
 // -- TextCharIter --
 
 pub struct TextCharIter<'tp> {
-    text_page: &'tp TextPage<'tp>,
+    text_page: &'tp TextPage<'tp, 'tp>,
     index: i32,
     count: i32,
 }

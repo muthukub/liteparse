@@ -3,8 +3,16 @@ use std::sync::Arc;
 use crate::error::LiteParseError;
 use crate::ocr::{OcrEngine, OcrOptions, OcrResult};
 use crate::types::{Page, TextItem};
-use image::{ImageBuffer, Rgba};
-use pdfium::Document;
+use pdfium::{Document, ImageBounds};
+
+/// Minimum dark filled-path area (pt², ~72 DPI page space) not covered by
+/// native text before a page is sent to OCR. 400 pt² is roughly one word at
+/// a 10–12pt size; anything smaller is likely a bullet, icon, dot leader, or
+/// decoration whose loss is acceptable. A false trigger only costs an extra
+/// OCR pass (the overlap filter discards OCR results that duplicate native
+/// text); measured on a 121-page financial report, the trigger fires on ~3
+/// pages at this threshold.
+const UNCOVERED_VECTOR_AREA_THRESHOLD: f32 = 400.0;
 
 /// Owned page bitmap prepared for OCR. Indices refer to positions in the `pages` slice.
 pub(crate) struct RenderedPage {
@@ -25,14 +33,17 @@ pub(crate) fn render_pages_for_ocr(
 ) -> Result<Vec<RenderedPage>, LiteParseError> {
     let mut rendered = Vec::new();
     for (idx, page) in pages.iter().enumerate() {
-        // Count only non-garbled native text. Substitution-cipher-style corrupt
+        // Count only usable native text. Substitution-cipher-style corrupt
         // encodings (e.g. PDFs with a broken cmap) produce long "text" that looks
         // populated but is unreadable — without this, such pages bypass OCR
-        // because text_length >= 20 and coverage looks fine.
+        // because text_length >= 20 and coverage looks fine. The same applies to
+        // unmappable items (Type3 fonts with no ToUnicode), whose text is a
+        // char-code fallback and whose bounding boxes come from deceptive
+        // declared metrics.
         let text_length: usize = page
             .text_items
             .iter()
-            .filter(|item| !is_likely_garbled(&item.text))
+            .filter(|item| !is_unusable_native(item))
             .map(|item| item.text.len())
             .sum();
         let page_obj = document.page((page.page_number - 1) as i32)?;
@@ -42,7 +53,7 @@ pub(crate) fn render_pages_for_ocr(
         let text_bbox_area: f32 = page
             .text_items
             .iter()
-            .filter(|item| !is_likely_garbled(&item.text))
+            .filter(|item| !is_unusable_native(item))
             .map(|item| item.width * item.height)
             .sum();
         let text_coverage = if page_area > 0.0 {
@@ -51,8 +62,21 @@ pub(crate) fn render_pages_for_ocr(
             0.0
         };
 
-        let needs_ocr =
+        let mut needs_ocr =
             text_length < 20 || text_coverage < 0.15 || has_images || page_is_garbled(page);
+
+        // Text drawn as filled vector outlines lives outside the text layer
+        // entirely: no text items, no image XObjects, so none of the above
+        // triggers fire on a text-dense page. Detect it by measuring filled
+        // path area that native text doesn't account for. Checked last so the
+        // page-object walk only runs when the cheap predicates all pass.
+        if !needs_ocr {
+            let path_bounds = page_obj.filled_path_bounds(3.0, 0.9);
+            let uncovered = uncovered_path_area(&path_bounds, &page.text_items);
+
+            needs_ocr = uncovered >= UNCOVERED_VECTOR_AREA_THRESHOLD;
+        }
+
         if !needs_ocr {
             continue;
         }
@@ -60,14 +84,9 @@ pub(crate) fn render_pages_for_ocr(
         let bitmap = page_obj.render(dpi)?;
         let width = bitmap.width() as u32;
         let height = bitmap.height() as u32;
-        let rgba = bitmap.to_rgba();
-
-        let img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_raw(width, height, rgba)
-            .ok_or(LiteParseError::Other(
-                "failed to create image buffer".into(),
-            ))?;
-        let rgb_img = image::DynamicImage::ImageRgba8(img).to_rgb8();
-        let rgb_bytes = rgb_img.into_raw();
+        // RGB is what OCR consumes; converting straight from BGRA avoids an
+        // intermediate full-frame RGBA buffer per page.
+        let rgb_bytes = bitmap.to_rgb();
 
         rendered.push(RenderedPage {
             idx,
@@ -88,8 +107,19 @@ pub(crate) async fn ocr_and_merge_rendered(
     ocr_language: &str,
     num_workers: usize,
 ) -> Result<(), LiteParseError> {
-    // Phase 1: spawn OCR tasks onto the tokio runtime so they run on
-    // separate threads. A semaphore limits concurrency to `num_workers`.
+    // Phase 1: spawn one async task per page. A semaphore limits how many run
+    // `recognize` concurrently to `num_workers`.
+    //
+    // The permit MUST be acquired in async context (`acquire_owned().await`),
+    // not inside `spawn_blocking` via `block_on`. Acquiring it on a blocking
+    // thread parks that OS thread until a permit is free; with more pages than
+    // tokio's blocking pool (default `max_blocking_threads = 512`), every pool
+    // thread ends up parked waiting on the semaphore. The single task holding
+    // the permit then calls `recognize`, whose HTTP client resolves DNS via its
+    // own internal `spawn_blocking` — which can never get a thread, so the
+    // request never goes out, the permit is never released, and the whole OCR
+    // pass deadlocks. Acquiring the permit asynchronously parks the lightweight
+    // task instead, so only `num_workers` blocking threads are ever consumed.
     let num_workers = num_workers.max(1);
     let semaphore = Arc::new(tokio::sync::Semaphore::new(num_workers));
     let mut handles = Vec::with_capacity(rendered.len());
@@ -106,13 +136,25 @@ pub(crate) async fn ocr_and_merge_rendered(
         handles.push((
             r.idx,
             page_number,
-            tokio::task::spawn_blocking(move || {
-                // Block this thread until a permit is available.
-                let _permit = rt_handle
-                    .block_on(sem.acquire_owned())
-                    .expect("semaphore closed");
+            tokio::spawn(async move {
+                // Park the task (not an OS thread) until a permit is available.
+                let _permit = sem.acquire_owned().await.expect("semaphore closed");
                 let options = OcrOptions { language };
-                rt_handle.block_on(engine.recognize(&r.rgb_bytes, r.width, r.height, &options))
+                // Offload the (possibly CPU-blocking, e.g. Tesseract) recognize
+                // onto a blocking thread. Because the permit is already held,
+                // at most `num_workers` blocking threads are in use at once,
+                // leaving the rest of the pool free for the HTTP client's
+                // internal DNS resolution.
+                match tokio::task::spawn_blocking(move || {
+                    rt_handle.block_on(engine.recognize(&r.rgb_bytes, r.width, r.height, &options))
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(join_err) => {
+                        Err(Box::new(join_err) as Box<dyn std::error::Error + Send + Sync>)
+                    }
+                }
             }),
         ));
     }
@@ -169,17 +211,17 @@ pub(crate) async fn ocr_and_merge_rendered(
         }
 
         let page = &mut pages[idx];
-        // Drop garbled native items (e.g. substitution-cipher cmap corruption) so
-        // OCR can replace them. Without this, garbled-but-spatially-present native
-        // text suppresses every OCR result that overlaps it via the overlap check
-        // below, leaving the output stuck with unreadable cipher text. We apply
-        // both per-item and per-page checks: short garbled labels ("GDWH",
-        // "XVG") can't be flagged alone, but their host page can.
+        // Drop unusable native items (substitution-cipher cmap corruption, or
+        // unmappable Type3 text) so OCR can replace them. Without this,
+        // garbled-but-spatially-present native text suppresses every OCR
+        // result that overlaps it via the overlap check below, leaving the
+        // output stuck with unreadable text. We apply both per-item and
+        // per-page checks: short garbled labels ("GDWH", "XVG") can't be
+        // flagged alone, but their host page can.
         if page_is_garbled(page) {
             page.text_items.clear();
         } else {
-            page.text_items
-                .retain(|item| !is_likely_garbled(&item.text));
+            page.text_items.retain(|item| !is_unusable_native(item));
         }
 
         // Only check overlap against native (already-extracted) PDF text. Comparing
@@ -192,10 +234,36 @@ pub(crate) async fn ocr_and_merge_rendered(
                 continue;
             }
 
-            let ocr_x = r.bbox[0] * scale_factor;
-            let ocr_y = r.bbox[1] * scale_factor;
-            let ocr_w = (r.bbox[2] - r.bbox[0]) * scale_factor;
-            let ocr_h = (r.bbox[3] - r.bbox[1]) * scale_factor;
+            // Prefer the screen-space axis-aligned bbox derived from the polygon
+            // (when present) so rotated detections carry a tight upright bbox.
+            // The polygon also lets us recover an explicit rotation angle so the
+            // projector can route rotated sidebar text through its rotation
+            // reading-order handler instead of mistaking it for body text.
+            let (ocr_x, ocr_y, ocr_w, ocr_h, rotation) = match r.polygon {
+                Some(poly) => {
+                    let xs = [poly[0][0], poly[1][0], poly[2][0], poly[3][0]];
+                    let ys = [poly[0][1], poly[1][1], poly[2][1], poly[3][1]];
+                    let x_min = xs.iter().copied().fold(f32::INFINITY, f32::min);
+                    let x_max = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let y_min = ys.iter().copied().fold(f32::INFINITY, f32::min);
+                    let y_max = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let rot = polygon_rotation_deg(&poly);
+                    (
+                        x_min * scale_factor,
+                        y_min * scale_factor,
+                        (x_max - x_min) * scale_factor,
+                        (y_max - y_min) * scale_factor,
+                        rot,
+                    )
+                }
+                None => (
+                    r.bbox[0] * scale_factor,
+                    r.bbox[1] * scale_factor,
+                    (r.bbox[2] - r.bbox[0]) * scale_factor,
+                    (r.bbox[3] - r.bbox[1]) * scale_factor,
+                    0.0,
+                ),
+            };
 
             if overlaps_existing_text(
                 &page.text_items[..native_count],
@@ -213,14 +281,25 @@ pub(crate) async fn ocr_and_merge_rendered(
                 continue;
             }
 
+            // For native rotated text the font_size approximates line height,
+            // which for 90/270° rotations corresponds to the *narrow* screen
+            // dimension. Use the perpendicular extent for rotated OCR text so
+            // downstream font-size heuristics stay sane.
+            let font_size_hint = if rotation == 90.0 || rotation == 270.0 {
+                ocr_w.max(1.0)
+            } else {
+                ocr_h
+            };
+
             page.text_items.push(TextItem {
                 text: cleaned,
                 x: ocr_x,
                 y: ocr_y,
                 width: ocr_w,
                 height: ocr_h,
+                rotation,
                 font_name: Some("OCR".to_string()),
-                font_size: Some(ocr_h),
+                font_size: Some(font_size_hint),
                 confidence: Some((r.confidence * 1000.0).round() / 1000.0),
                 ..Default::default()
             });
@@ -264,14 +343,14 @@ fn page_has_sparse_native_text(page: &Page) -> bool {
     let text_length: usize = page
         .text_items
         .iter()
-        .filter(|item| !is_likely_garbled(&item.text))
+        .filter(|item| !is_unusable_native(item))
         .map(|item| item.text.len())
         .sum();
     let page_area = page.page_width * page.page_height;
     let text_bbox_area: f32 = page
         .text_items
         .iter()
-        .filter(|item| !is_likely_garbled(&item.text))
+        .filter(|item| !is_unusable_native(item))
         .map(|item| item.width * item.height)
         .sum();
     let text_coverage = if page_area > 0.0 {
@@ -281,6 +360,44 @@ fn page_has_sparse_native_text(page: &Page) -> bool {
     };
 
     text_length < 20 || text_coverage < 0.15
+}
+
+/// A native text item that cannot be trusted as a text source: either its
+/// Unicode mapping failed outright (Type3 fonts with no ToUnicode — the text
+/// is a char-code fallback and the bbox comes from deceptive declared
+/// metrics), or its content looks substitution-cipher garbled.
+fn is_unusable_native(item: &TextItem) -> bool {
+    item.has_unicode_map_error || is_likely_garbled(&item.text)
+}
+
+/// Total area of filled vector paths not accounted for by native text items.
+/// Glyph outlines drawn as paths produce filled regions with no overlapping
+/// text item; rules and table borders are stroke-only and already excluded
+/// upstream, and shading rects behind real text are subtracted away by the
+/// text overlap. Coverage is approximated by summing per-item intersections
+/// (clamped to the path's own area), which can only over-estimate coverage —
+/// i.e. err toward not triggering OCR.
+fn uncovered_path_area(paths: &[ImageBounds], items: &[TextItem]) -> f32 {
+    let mut uncovered = 0.0f32;
+    for p in paths {
+        let p_area = p.width * p.height;
+        if p_area <= 0.0 {
+            continue;
+        }
+        let mut covered = 0.0f32;
+        for item in items {
+            let ix = (p.x + p.width).min(item.x + item.width) - p.x.max(item.x);
+            let iy = (p.y + p.height).min(item.y + item.height) - p.y.max(item.y);
+            if ix > 0.0 && iy > 0.0 {
+                covered += ix * iy;
+                if covered >= p_area {
+                    break;
+                }
+            }
+        }
+        uncovered += (p_area - covered).max(0.0);
+    }
+    uncovered
 }
 
 /// Heuristic for substitution-cipher / broken-cmap garbling: real Latin-script
@@ -332,6 +449,43 @@ fn page_is_garbled(page: &Page) -> bool {
     // simple +3 Caesar shift still leaves some U/Y letters from the original
     // O/Y mapping, so a 10% bound is too tight to catch this in practice.)
     total_vowels * 5 < total_letters
+}
+
+/// Recover a discrete CCW rotation in degrees from a 4-point OCR polygon.
+/// Returns one of 0.0, 90.0, 180.0, 270.0 — snapping to the nearest right
+/// angle — or 0.0 for nearly-square/degenerate polygons.
+///
+/// Point ordering varies between OCR engines: some emit TL→TR→BR→BL in the
+/// glyphs' upright reading frame (so poly[0]→poly[1] is always the reading
+/// direction), but others (notably PaddleOCR 3.x with
+/// `use_textline_orientation=True`) emit polygons in screen-axis order, where
+/// poly[0]→poly[1] is always horizontal in screen space regardless of how the
+/// text actually reads. To handle both, we pick the *longer* of the two
+/// adjacent edges as the reading direction — the text always runs along the
+/// long axis of its bounding quadrilateral.
+fn polygon_rotation_deg(poly: &[[f32; 2]; 4]) -> f32 {
+    let e0 = [poly[1][0] - poly[0][0], poly[1][1] - poly[0][1]];
+    let e1 = [poly[2][0] - poly[1][0], poly[2][1] - poly[1][1]];
+    let len0 = (e0[0] * e0[0] + e0[1] * e0[1]).sqrt();
+    let len1 = (e1[0] * e1[0] + e1[1] * e1[1]).sqrt();
+    if len0.max(len1) < 1.0 {
+        return 0.0;
+    }
+    // Treat near-square polygons as un-rotated — there's no reliable reading
+    // axis to pick from. Single-char/CJK detections fall in here.
+    let (longer, shorter) = if len0 >= len1 {
+        (len0, len1)
+    } else {
+        (len1, len0)
+    };
+    if shorter > 0.0 && longer / shorter < 1.3 {
+        return 0.0;
+    }
+    let reading = if len0 >= len1 { e0 } else { e1 };
+    // atan2 with screen-down y; negate to get the conventional CCW angle.
+    let angle_ccw = -reading[1].atan2(reading[0]).to_degrees();
+    let normalized = angle_ccw.rem_euclid(360.0);
+    ((normalized / 90.0).round() as i32 * 90).rem_euclid(360) as f32
 }
 
 /// Check if an OCR bounding box overlaps with any existing text item.
@@ -396,6 +550,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_polygon_rotation_horizontal() {
+        let p = [[0.0, 0.0], [100.0, 0.0], [100.0, 20.0], [0.0, 20.0]];
+        assert_eq!(polygon_rotation_deg(&p), 0.0);
+    }
+
+    #[test]
+    fn test_polygon_rotation_90_ccw() {
+        // Upright text rotated 90° CCW: TL→TR edge points upward (screen y decreasing).
+        let p = [[10.0, 100.0], [10.0, 0.0], [30.0, 0.0], [30.0, 100.0]];
+        assert_eq!(polygon_rotation_deg(&p), 90.0);
+    }
+
+    #[test]
+    fn test_polygon_rotation_270_ccw() {
+        // Upright text rotated 270° CCW (= 90° CW): TL→TR edge points downward.
+        let p = [[10.0, 0.0], [10.0, 100.0], [30.0, 100.0], [30.0, 0.0]];
+        assert_eq!(polygon_rotation_deg(&p), 270.0);
+    }
+
+    #[test]
+    fn test_polygon_rotation_screen_axis_vertical() {
+        // PaddleOCR-style: tall+narrow sidebar polygon in screen-axis order
+        // (smallest-y first). poly[0]→poly[1] is the SHORT horizontal edge,
+        // not the reading direction. The longer edge picks out the rotation.
+        let p = [[20.0, 50.0], [50.0, 50.0], [50.0, 750.0], [20.0, 750.0]];
+        let r = polygon_rotation_deg(&p);
+        assert!(r == 90.0 || r == 270.0, "expected 90 or 270, got {r}");
+    }
+
+    #[test]
+    fn test_polygon_rotation_near_square() {
+        // Single-char detections (CJK glyphs, etc.) should not be classified
+        // as rotated — there's no reliable reading axis.
+        let p = [[0.0, 0.0], [20.0, 0.0], [20.0, 22.0], [0.0, 22.0]];
+        assert_eq!(polygon_rotation_deg(&p), 0.0);
+    }
+
+    #[test]
+    fn test_polygon_rotation_180() {
+        let p = [[100.0, 20.0], [0.0, 20.0], [0.0, 0.0], [100.0, 0.0]];
+        assert_eq!(polygon_rotation_deg(&p), 180.0);
+    }
+
+    #[test]
     fn test_clean_ocr_table_artifacts() {
         assert_eq!(clean_ocr_table_artifacts("44520]"), "44520");
         assert_eq!(clean_ocr_table_artifacts("|123"), "123");
@@ -442,6 +640,58 @@ mod tests {
     #[test]
     fn test_overlaps_empty() {
         assert!(!overlaps_existing_text(&[], 0.0, 0.0, 1.0, 1.0, 0.0));
+    }
+
+    fn pb(x: f32, y: f32, w: f32, h: f32) -> ImageBounds {
+        ImageBounds {
+            x,
+            y,
+            width: w,
+            height: h,
+        }
+    }
+
+    #[test]
+    fn test_uncovered_path_area_no_text() {
+        // A sentence-sized outlined region with no native text at all.
+        let paths = vec![pb(50.0, 300.0, 200.0, 12.0)];
+        let area = uncovered_path_area(&paths, &[]);
+        assert!((area - 2400.0).abs() < 1.0);
+        assert!(area >= UNCOVERED_VECTOR_AREA_THRESHOLD);
+    }
+
+    #[test]
+    fn test_uncovered_path_area_fully_covered_by_text() {
+        // Shading rect behind real text: fully covered, must not trigger.
+        let paths = vec![pb(50.0, 300.0, 200.0, 12.0)];
+        let items = vec![make_item(40.0, 295.0, 250.0, 25.0)];
+        let area = uncovered_path_area(&paths, &items);
+        assert_eq!(area, 0.0);
+    }
+
+    #[test]
+    fn test_uncovered_path_area_partial_coverage() {
+        // Half the outlined region is covered by a text item.
+        let paths = vec![pb(0.0, 0.0, 100.0, 10.0)];
+        let items = vec![make_item(0.0, 0.0, 50.0, 10.0)];
+        let area = uncovered_path_area(&paths, &items);
+        assert!((area - 500.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_uncovered_path_area_small_decoration_below_threshold() {
+        // A few bullet-sized filled paths shouldn't reach the threshold.
+        let paths = vec![pb(10.0, 10.0, 8.0, 8.0), pb(10.0, 30.0, 8.0, 8.0)];
+        let area = uncovered_path_area(&paths, &[]);
+        assert!(area < UNCOVERED_VECTOR_AREA_THRESHOLD);
+    }
+
+    #[test]
+    fn test_unusable_native_unicode_map_error() {
+        let mut item = make_item(0.0, 0.0, 10.0, 10.0);
+        assert!(!is_unusable_native(&item));
+        item.has_unicode_map_error = true;
+        assert!(is_unusable_native(&item));
     }
 
     #[test]
