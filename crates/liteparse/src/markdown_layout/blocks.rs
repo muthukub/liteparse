@@ -25,9 +25,12 @@ pub enum Block {
     },
     /// Fenced code block — content rendered between triple-backtick fences.
     /// Each entry in `lines` is one source line; preserved as-is (only trailing
-    /// whitespace stripped) so indentation survives.
+    /// whitespace stripped) so indentation survives. `lang` is a best-effort
+    /// language hint emitted as the fence info-string (e.g. ```` ```python ````)
+    /// when the body matches a known language; `None` emits a bare fence.
     CodeBlock {
         lines: Vec<String>,
+        lang: Option<String>,
     },
     /// Confident table emitted as a markdown pipe table. `header` is `None`
     /// when the first row didn't qualify (e.g. wasn't bold and the table mode
@@ -216,7 +219,7 @@ pub fn render_blocks(blocks: &[Block]) -> String {
                 }
                 out.push_str("```");
             }
-            Block::CodeBlock { lines } => {
+            Block::CodeBlock { lines, lang } => {
                 // Pick a fence that doesn't appear inside the body. Standard
                 // triple-backtick handles ~all real-world code; bump to ~~~ if
                 // the body itself contains ``` (rare).
@@ -226,6 +229,9 @@ pub fn render_blocks(blocks: &[Block]) -> String {
                     "```"
                 };
                 out.push_str(fence);
+                if let Some(lang) = lang {
+                    out.push_str(lang);
+                }
                 out.push('\n');
                 for line in lines {
                     out.push_str(line);
@@ -338,6 +344,7 @@ mod tests {
     fn code_block_escapes_internal_fence() {
         let blocks = vec![Block::CodeBlock {
             lines: vec!["body containing ``` backticks".into()],
+            lang: None,
         }];
         let s = render_blocks(&blocks);
         assert!(s.starts_with("~~~\n"));

@@ -433,7 +433,8 @@ impl FlowState {
         if let Some(lines) = self.code.take()
             && !lines.is_empty()
         {
-            blocks.push(Block::CodeBlock { lines });
+            let lang = detect_code_language(&lines);
+            blocks.push(Block::CodeBlock { lines, lang });
         }
     }
 
@@ -908,6 +909,67 @@ fn classify_region(
     blocks
 }
 
+/// Best-effort language hint for a fenced code block, used as the fence
+/// info-string. Conservative: returns `Some` only when the body carries
+/// strong, language-specific signals; otherwise `None` (bare fence). This
+/// feeds markdown consumers that key off the language tag (e.g. syntax
+/// highlighting, ParseBench's `is_code_block` rule).
+fn detect_code_language(lines: &[String]) -> Option<String> {
+    let body = lines.join("\n");
+    let trimmed = body.trim_start();
+
+    // JSON: starts with a brace/bracket and reads as an object/array with
+    // quoted keys. Checked first because `{`/`[` are unambiguous openers.
+    if let Some(first) = trimmed.chars().find(|c| !c.is_whitespace())
+        && (first == '{' || first == '[')
+        && body.contains("\":")
+        && body.matches('{').count() + body.matches('[').count() >= 1
+    {
+        return Some("json".to_string());
+    }
+
+    // C / C++: preprocessor includes, namespace qualifiers, stream ops.
+    let cpp_hits = [
+        "#include",
+        "std::",
+        "int main",
+        "nullptr",
+        "->",
+        "::",
+        "template<",
+    ]
+    .iter()
+    .filter(|s| body.contains(**s))
+    .count();
+    if cpp_hits >= 2 {
+        return Some("cpp".to_string());
+    }
+
+    // Python: keyword-led lines, f-strings, comprehensions, dunder/`self.`.
+    let py_signals = [
+        "self.", "import ", "from ", "def ", "class ", "print(", "lambda ", "elif ", "f'", "f\"",
+        "__", " for ", "len(", "sorted(", "range(",
+    ];
+    let py_hits = py_signals.iter().filter(|s| body.contains(**s)).count();
+    // A colon-terminated control line (`if ...:`, `for ...:`, `def ...:`) is a
+    // strong Python tell that other curly-brace languages lack.
+    let py_colon_block = lines.iter().any(|l| {
+        let t = l.trim_end();
+        t.ends_with(':')
+            && [
+                "if ", "for ", "while ", "def ", "class ", "elif ", "else", "try", "except",
+                "with ",
+            ]
+            .iter()
+            .any(|kw| t.trim_start().starts_with(kw))
+    });
+    if py_hits >= 2 || (py_hits >= 1 && py_colon_block) {
+        return Some("python".to_string());
+    }
+
+    None
+}
+
 /// Cross-region merging. Walks the concatenated block stream and, at each
 /// region boundary, tries to fuse the last block of region A with the first
 /// block of region B when they represent one logical unit split across leaves.
@@ -1091,7 +1153,7 @@ mod tests {
         // Expect: Paragraph("Intro line."), CodeBlock(2 lines), Paragraph("After...")
         assert_eq!(blocks.len(), 3);
         match &blocks[1] {
-            Block::CodeBlock { lines } => {
+            Block::CodeBlock { lines, .. } => {
                 assert_eq!(lines.len(), 2);
                 assert!(lines[0].contains("let x = 1;"));
                 assert!(lines[1].contains("let y = x + 2;"));
@@ -1101,6 +1163,38 @@ mod tests {
         let s = render_blocks(&blocks);
         assert!(s.contains("```\n    let x = 1;"));
         assert!(s.ends_with("After the code."));
+    }
+
+    #[test]
+    fn detect_code_language_classifies_common_langs() {
+        let py = vec![
+            "self.mm_list = sorted([x for x in self.files_list])".to_string(),
+            "self.mm_total = len(self.mm_list)".to_string(),
+        ];
+        assert_eq!(detect_code_language(&py).as_deref(), Some("python"));
+
+        let py_block = vec![
+            "if item.total > 0:".to_string(),
+            "    print('many')".to_string(),
+        ];
+        assert_eq!(detect_code_language(&py_block).as_deref(), Some("python"));
+
+        let json = vec![
+            "{".to_string(),
+            "    \"formatVersion\": \"1.0\",".to_string(),
+            "}".to_string(),
+        ];
+        assert_eq!(detect_code_language(&json).as_deref(), Some("json"));
+
+        let cpp = vec![
+            "#include <vector>".to_string(),
+            "std::vector<int> v;".to_string(),
+        ];
+        assert_eq!(detect_code_language(&cpp).as_deref(), Some("cpp"));
+
+        // Ambiguous / unknown content stays untagged (bare fence).
+        let unknown = vec!["let x = 1;".to_string(), "let y = x + 2;".to_string()];
+        assert_eq!(detect_code_language(&unknown), None);
     }
 
     #[test]
