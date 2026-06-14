@@ -252,6 +252,13 @@ pub struct ProjectedLine {
     /// based on glyph content (descenders, parens, capitals), so heading
     /// detection must use a wider margin over body for these lines.
     pub font_size_is_estimated: bool,
+    /// Precise matrix-derived size (`Tf_size × text_matrix_scale`) for
+    /// matrix-baked-size lines, when a glyph exposed a text matrix. Used
+    /// *only* by heading detection (body-size + heading map), where the
+    /// jitter-free value beats the bbox-height estimate in `dominant_font_size`.
+    /// Deliberately NOT consumed by table/paragraph grouping, which stay on
+    /// `dominant_font_size` to avoid perturbing well-tuned line grouping.
+    pub heading_font_size: Option<f32>,
     pub dominant_font_name: Option<String>,
     pub all_bold: bool,
     pub all_italic: bool,

@@ -1,5 +1,12 @@
 use crate::types::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::LazyLock;
+
+/// Kill-switch for using the matrix-derived `font_height` as the size signal
+/// on matrix-baked-size lines (raw `font_size ≈ 1.0`). When set, fall back to
+/// the legacy char-weighted bbox-height estimate.
+static DISABLE_FONT_HEIGHT_SIZE: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("LITEPARSE_DISABLE_FONT_HEIGHT_SIZE").is_ok());
 
 const FLOATING_SPACES: usize = 2;
 const COLUMN_SPACES: usize = 4;
@@ -4604,6 +4611,10 @@ fn build_one_line(
 
     let mut size_weights: HashMap<u32, (f32, usize)> = HashMap::new();
     let mut height_weights: HashMap<u32, (f32, usize)> = HashMap::new();
+    // Matrix-derived true on-page size (`Tf_size × text_matrix_scale`, computed
+    // in extract.rs). For matrix-baked-size fonts this is the precise size the
+    // raw `font_size` (≈1.0) hides; jitter-free, unlike bbox height.
+    let mut font_height_weights: HashMap<u32, (f32, usize)> = HashMap::new();
     let mut name_weights: HashMap<String, usize> = HashMap::new();
     let mut bold_chars: usize = 0;
     let mut italic_chars: usize = 0;
@@ -4644,6 +4655,13 @@ fn build_one_line(
         let h_key = (it.height.max(0.0) * 100.0).round() as u32;
         let e = height_weights.entry(h_key).or_insert((it.height, 0));
         e.1 += n;
+        if let Some(fh) = it.font_height
+            && fh > 1.5
+        {
+            let fh_key = (fh * 100.0).round() as u32;
+            let e = font_height_weights.entry(fh_key).or_insert((fh, 0));
+            e.1 += n;
+        }
 
         if let Some(name) = &it.font_name {
             *name_weights.entry(name.clone()).or_insert(0) += n;
@@ -4684,8 +4702,9 @@ fn build_one_line(
         .map(|(_, (s, _))| *s)
         .unwrap_or(0.0);
     // Fallback: when PDFium reports font_size ≤ 1.5 (size baked into the text
-    // matrix), use char-weighted bbox height instead so heading detection has
-    // something to chew on. Documented in MARKDOWN_PROGRESS.md.
+    // matrix), use char-weighted bbox height so the size-dependent grouping
+    // (tables, paragraphs) keeps its well-tuned behavior. Documented in
+    // MARKDOWN_PROGRESS.md.
     let (dominant_font_size, font_size_is_estimated) = if dominant_size_from_font > 1.5 {
         (dominant_size_from_font, false)
     } else {
@@ -4695,6 +4714,21 @@ fn build_one_line(
             .map(|(_, (h, _))| *h)
             .unwrap_or(0.0);
         (h, true)
+    };
+
+    // Precise size for *heading detection only*: when the raw size is baked,
+    // the matrix-derived `font_height` (Tf_size × text_matrix_scale) is the
+    // jitter-free on-page size, far better than the bbox-height estimate above
+    // for separating headings from body. Routed only to body-size + heading-map
+    // (see `heading_font_size` doc on ProjectedLine); table/paragraph grouping
+    // deliberately keeps the bbox-height value to avoid regressing TEDS.
+    let heading_font_size = if dominant_size_from_font > 1.5 || *DISABLE_FONT_HEIGHT_SIZE {
+        None
+    } else {
+        font_height_weights
+            .iter()
+            .max_by_key(|(k, (_, n))| (*n, **k))
+            .map(|(_, (h, _))| *h)
     };
 
     let dominant_font_name = name_weights
@@ -4741,6 +4775,7 @@ fn build_one_line(
         indent_x: bbox.x,
         dominant_font_size,
         font_size_is_estimated,
+        heading_font_size,
         dominant_font_name,
         all_bold: majority(bold_chars),
         all_italic: majority(italic_chars),

@@ -562,7 +562,7 @@ pub fn compute_body_size(pages: &[ParsedPage]) -> f32 {
             if is_rotated_line(line) {
                 continue;
             }
-            let size = line.dominant_font_size;
+            let size = heading_size_of(line);
             if size <= 0.0 {
                 continue;
             }
@@ -634,7 +634,7 @@ pub fn build_heading_map(pages: &[ParsedPage], body_size: f32) -> Vec<(f32, u8)>
             if is_caption_line(&line.text) {
                 continue;
             }
-            let size = line.dominant_font_size;
+            let size = heading_size_of(line);
             let margin = if line.font_size_is_estimated {
                 ESTIMATED_HEADING_SIZE_MARGIN
             } else {
@@ -706,6 +706,14 @@ fn alpha_ratio(text: &str) -> f32 {
         return 0.0;
     }
     alpha as f32 / total as f32
+}
+
+/// Size a line presents to heading detection: the precise matrix-derived
+/// `heading_font_size` when available (matrix-baked-size lines), else the
+/// `dominant_font_size`. Used by `compute_body_size`, `build_heading_map`, and
+/// the per-line heading-level lookup — NOT by table/paragraph grouping.
+pub(super) fn heading_size_of(line: &ProjectedLine) -> f32 {
+    line.heading_font_size.unwrap_or(line.dominant_font_size)
 }
 
 pub(super) fn heading_level_for(size: f32, heading_map: &[(f32, u8)]) -> Option<u8> {

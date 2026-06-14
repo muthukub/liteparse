@@ -2,9 +2,9 @@ use crate::types::{OutlineTarget, ParsedPage, ProjectedLine};
 
 use super::blocks::{Block, paragraph_from_accum};
 use super::headings::{
-    HEADING_MAX_TEXT_CHARS, MAX_HEADING_LEVELS, heading_level_for, is_caption_line, is_toc_title,
-    looks_like_bold_heading, looks_like_numbered_bold_heading, outline_heading_level, page_is_toc,
-    struct_heading_level,
+    HEADING_MAX_TEXT_CHARS, MAX_HEADING_LEVELS, heading_level_for, heading_size_of,
+    is_caption_line, is_toc_title, looks_like_bold_heading, looks_like_numbered_bold_heading,
+    outline_heading_level, page_is_toc, struct_heading_level,
 };
 use super::hr::detect_horizontal_rules;
 use super::inline::{
@@ -605,7 +605,7 @@ fn classify_region(
         let size_level = if is_caption_line(text) || toc_suppress {
             None
         } else {
-            heading_level_for(line.dominant_font_size, heading_map)
+            heading_level_for(heading_size_of(line), heading_map)
         };
         // Guard against height-jitter false headings: a line that flows from
         // the previous line (same paragraph) AND starts lowercase is a

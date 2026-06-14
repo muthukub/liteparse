@@ -100,6 +100,7 @@ mod tests {
             indent_x: x,
             dominant_font_size: size,
             font_size_is_estimated: false,
+            heading_font_size: None,
             dominant_font_name: Some("Arial".into()),
             all_bold: false,
             all_italic: false,
