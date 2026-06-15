@@ -49,24 +49,27 @@ fn resolve_component(comp: &str) -> Option<String> {
     }
 
     // uniXXXX (one or more groups of exactly 4 uppercase hex digits)
-    if let Some(hex) = comp.strip_prefix("uni") {
-        if !hex.is_empty() && hex.len() % 4 == 0 && hex.bytes().all(is_agl_hex_digit) {
-            let mut s = String::new();
-            for group in hex.as_bytes().chunks(4) {
-                let v = u32::from_str_radix(std::str::from_utf8(group).ok()?, 16).ok()?;
-                // Surrogate range is invalid scalar values
-                s.push(char::from_u32(v)?);
-            }
-            return Some(s);
+    if let Some(hex) = comp.strip_prefix("uni")
+        && !hex.is_empty()
+        && hex.len() % 4 == 0
+        && hex.bytes().all(is_agl_hex_digit)
+    {
+        let mut s = String::new();
+        for group in hex.as_bytes().chunks(4) {
+            let v = u32::from_str_radix(std::str::from_utf8(group).ok()?, 16).ok()?;
+            // Surrogate range is invalid scalar values
+            s.push(char::from_u32(v)?);
         }
+        return Some(s);
     }
 
     // uXXXX / uXXXXX / uXXXXXX
-    if let Some(hex) = comp.strip_prefix('u') {
-        if (4..=6).contains(&hex.len()) && hex.bytes().all(is_agl_hex_digit) {
-            let v = u32::from_str_radix(hex, 16).ok()?;
-            return char::from_u32(v).map(String::from);
-        }
+    if let Some(hex) = comp.strip_prefix('u')
+        && (4..=6).contains(&hex.len())
+        && hex.bytes().all(is_agl_hex_digit)
+    {
+        let v = u32::from_str_radix(hex, 16).ok()?;
+        return char::from_u32(v).map(String::from);
     }
 
     // Static table lookup

@@ -28,6 +28,8 @@ export interface LiteParseNativeConfig {
   targetPages?: string;
   dpi?: number;
   outputFormat?: string;
+  imageMode?: string;
+  extractLinks?: boolean;
   preserveVerySmallText?: boolean;
   password?: string;
   quiet?: boolean;
@@ -53,9 +55,17 @@ export interface NativeParsedPage {
   textItems: NativeTextItem[];
 }
 
+export interface NativeExtractedImage {
+  id: string;
+  page: number;
+  format: string;
+  bytes: Buffer;
+}
+
 export interface NativeParseResult {
   pages: NativeParsedPage[];
   text: string;
+  images: NativeExtractedImage[];
 }
 
 export interface NativeScreenshotResult {

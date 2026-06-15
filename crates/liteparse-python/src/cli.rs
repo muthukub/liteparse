@@ -1,5 +1,5 @@
 use clap::{Args, Parser, Subcommand};
-use liteparse::config::{LiteParseConfig, OutputFormat};
+use liteparse::config::{ImageMode, LiteParseConfig, OutputFormat};
 use liteparse::conversion;
 use liteparse::output::{json, text};
 use liteparse::parser::LiteParse;
@@ -54,6 +54,20 @@ struct ParseCommand {
     quiet: bool,
     #[arg(long)]
     num_workers: Option<usize>,
+    /// How to surface raster images in markdown output: `off`, `placeholder`
+    /// (default), or `embed` (extracts PNG bytes, written next to the output
+    /// when `--image-output-dir` is set).
+    #[arg(long, default_value = "placeholder")]
+    image_mode: String,
+    /// Directory to write embedded images to when `--image-mode embed` is set.
+    /// Each image is written as `image_{id}.png` to match the markdown
+    /// references. Created if missing.
+    #[arg(long)]
+    image_output_dir: Option<String>,
+    /// Disable hyperlink extraction. By default URI link annotations render as
+    /// `[text](url)` in markdown output; pass this to emit plain anchor text.
+    #[arg(long)]
+    no_links: bool,
 }
 
 #[derive(Args, Debug)]
@@ -113,6 +127,18 @@ fn parse_output_format(s: &str) -> Result<OutputFormat, String> {
     }
 }
 
+fn parse_image_mode(s: &str) -> Result<ImageMode, String> {
+    match s.to_lowercase().as_str() {
+        "off" | "none" => Ok(ImageMode::Off),
+        "placeholder" => Ok(ImageMode::Placeholder),
+        "embed" => Ok(ImageMode::Embed),
+        _ => Err(format!(
+            "unknown image-mode '{}', expected 'off', 'placeholder', or 'embed'",
+            s
+        )),
+    }
+}
+
 /// Run the CLI with the given args (typically from sys.argv).
 pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse_from(args);
@@ -121,6 +147,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Parse(cmd) => {
             let format = parse_output_format(&cmd.format)?;
+            let image_mode = parse_image_mode(&cmd.image_mode)?;
             let mut config = LiteParseConfig {
                 ocr_language: cmd.ocr_language,
                 ocr_enabled: !cmd.no_ocr,
@@ -133,6 +160,8 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 password: cmd.password,
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
+                image_mode,
+                extract_links: !cmd.no_links,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {
@@ -145,6 +174,22 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 OutputFormat::Text => text::format_text(&result.pages),
                 OutputFormat::Markdown => result.text.clone(),
             };
+            if let Some(dir) = cmd.image_output_dir.as_deref()
+                && !result.images.is_empty()
+            {
+                std::fs::create_dir_all(dir)?;
+                for img in &result.images {
+                    let path = format!("{}/image_{}.{}", dir, img.id, img.format);
+                    std::fs::write(&path, &img.bytes)?;
+                }
+                if !cmd.quiet {
+                    eprintln!(
+                        "[liteparse] wrote {} image(s) to {}",
+                        result.images.len(),
+                        dir
+                    );
+                }
+            }
             match cmd.output {
                 Some(path) => {
                     std::fs::write(&path, &formatted)?;

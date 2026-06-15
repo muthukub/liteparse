@@ -1,7 +1,6 @@
 use crate::error::LiteParseError;
-use crate::extract::load_document_from_input;
+use crate::extract::{encode_png, load_document_from_input};
 use crate::types::PdfInput;
-use image::ImageEncoder;
 use pdfium::Library;
 use serde::Serialize;
 
@@ -66,13 +65,6 @@ fn render_document_pages(
     }
 
     Ok(results)
-}
-
-pub(crate) fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, LiteParseError> {
-    let mut png_buf = Vec::new();
-    let encoder = image::codecs::png::PngEncoder::new(&mut png_buf);
-    encoder.write_image(rgba, width, height, image::ColorType::Rgba8.into())?;
-    Ok(png_buf)
 }
 
 /// Render a single page to a PNG file.

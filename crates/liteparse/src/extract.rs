@@ -1,10 +1,10 @@
 use crate::error::LiteParseError;
 use crate::glyph_names::resolve_glyph_name;
-use crate::render::encode_png;
 use crate::types::{
     ExtractedImage, GraphicPrimitive, ImageRef, OutlineTarget, Page as LitePage, PdfInput, Rect,
     StructNode, TextItem,
 };
+use image::ImageEncoder;
 use pdfium::{
     Document, Font, FontType, Library, Page, PathObject, PdfLink, RectF, SegmentKind, TextPage,
 };
@@ -308,6 +308,16 @@ pub(crate) fn render_page_images(
         });
     }
     out
+}
+
+/// Encode RGBA pixel bytes to PNG. Lives here (always-compiled) rather than in
+/// `render` so the image-embed path is available on wasm, where the `render`
+/// module (page rasterization / screenshots) is compiled out.
+pub(crate) fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, LiteParseError> {
+    let mut png_buf = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut png_buf);
+    encoder.write_image(rgba, width, height, image::ColorType::Rgba8.into())?;
+    Ok(png_buf)
 }
 
 /// Walk image objects on a page and return a stable per-page `ImageRef` for
@@ -967,7 +977,7 @@ fn median_f32(values: &[f32]) -> Option<f32> {
     let mut v: Vec<f32> = values.to_vec();
     v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let mid = v.len() / 2;
-    if v.len() % 2 == 0 {
+    if v.len().is_multiple_of(2) {
         Some((v[mid - 1] + v[mid]) / 2.0)
     } else {
         Some(v[mid])

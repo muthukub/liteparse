@@ -3101,9 +3101,12 @@ fn merge_stacked_header(
 ///   continuation rows.
 /// - **flattened header**: a fired colspan header flatten is table evidence on
 ///   par with a spine.
+///
 /// With a spine but above the higher WITH_SPINE ceiling, still reject (unless a
 /// long-prose table). `flattened` is whether `flatten_header_band` fired.
+///
 /// Returns `true` to keep the table, `false` to reject it.
+///
 fn passes_density_gate(
     cells: &[Vec<String>],
     cell_has_text: &[Vec<bool>],

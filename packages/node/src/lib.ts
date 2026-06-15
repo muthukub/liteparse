@@ -5,6 +5,7 @@ import {
   type NativeParseResult,
   type NativeParsedPage,
   type NativeTextItem,
+  type NativeExtractedImage,
 } from "./native.js";
 
 // ---------------------------------------------------------------------------
@@ -13,6 +14,7 @@ import {
 
 export type LiteParseInput = string | Buffer | Uint8Array;
 export type OutputFormat = "json" | "text" | "markdown";
+export type ImageMode = "off" | "placeholder" | "embed";
 
 export interface LiteParseConfig {
   ocrLanguage: string;
@@ -23,6 +25,10 @@ export interface LiteParseConfig {
   targetPages?: string;
   dpi: number;
   outputFormat: OutputFormat;
+  /** How to surface raster images in markdown output (default: "placeholder"). */
+  imageMode: ImageMode;
+  /** Render hyperlink annotations as `[text](url)` in markdown output (default: true). */
+  extractLinks: boolean;
   preserveVerySmallText: boolean;
   password?: string;
   quiet: boolean;
@@ -48,9 +54,19 @@ export interface ParsedPage {
   textItems: TextItem[];
 }
 
+export interface ExtractedImage {
+  /** Reference id used in the markdown output (e.g. `![](image_p1_0.png)` → `"p1_0"`). */
+  id: string;
+  page: number;
+  format: string;
+  bytes: Buffer;
+}
+
 export interface ParseResult {
   pages: ParsedPage[];
   text: string;
+  /** Populated only when configured with `imageMode: "embed"`. */
+  images: ExtractedImage[];
 }
 
 export interface ScreenshotResult {
@@ -78,6 +94,8 @@ export class LiteParse {
       targetPages: userConfig.targetPages,
       dpi: userConfig.dpi,
       outputFormat: userConfig.outputFormat,
+      imageMode: userConfig.imageMode,
+      extractLinks: userConfig.extractLinks,
       preserveVerySmallText: userConfig.preserveVerySmallText,
       password: userConfig.password,
       quiet: userConfig.quiet,
@@ -97,6 +115,8 @@ export class LiteParse {
       targetPages: resolved.targetPages ?? undefined,
       dpi: resolved.dpi ?? 150,
       outputFormat: (resolved.outputFormat as OutputFormat) ?? "json",
+      imageMode: (resolved.imageMode as ImageMode) ?? "placeholder",
+      extractLinks: resolved.extractLinks ?? true,
       preserveVerySmallText: resolved.preserveVerySmallText ?? false,
       password: resolved.password ?? undefined,
       quiet: resolved.quiet ?? false,
@@ -112,6 +132,7 @@ export class LiteParse {
     return {
       pages: result.pages.map(toPage),
       text: result.text,
+      images: (result.images ?? []).map(toImage),
     };
   }
 
@@ -145,6 +166,15 @@ function toPage(p: NativeParsedPage): ParsedPage {
     height: p.height,
     text: p.text,
     textItems: p.textItems.map(toTextItem),
+  };
+}
+
+function toImage(img: NativeExtractedImage): ExtractedImage {
+  return {
+    id: img.id,
+    page: img.page,
+    format: img.format,
+    bytes: img.bytes,
   };
 }
 

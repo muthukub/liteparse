@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
-use liteparse::config::{LiteParseConfig, OutputFormat};
+use liteparse::config::{ImageMode, LiteParseConfig, OutputFormat};
 use liteparse::ocr::{OcrEngine, OcrOptions, OcrResult};
 use liteparse::parser::LiteParse as CoreLiteParse;
 use liteparse::search;
@@ -45,6 +45,8 @@ struct JsLiteParseConfig {
     target_pages: Option<String>,
     dpi: Option<f32>,
     output_format: Option<String>,
+    image_mode: Option<String>,
+    extract_links: Option<bool>,
     preserve_very_small_text: Option<bool>,
     password: Option<String>,
     quiet: Option<bool>,
@@ -87,6 +89,16 @@ impl JsLiteParseConfig {
                 }
             };
         }
+        if let Some(v) = self.image_mode {
+            cfg.image_mode = match v.as_str() {
+                "off" | "none" => ImageMode::Off,
+                "embed" => ImageMode::Embed,
+                _ => ImageMode::Placeholder,
+            };
+        }
+        if let Some(v) = self.extract_links {
+            cfg.extract_links = v;
+        }
         if let Some(v) = self.preserve_very_small_text {
             cfg.preserve_very_small_text = v;
         }
@@ -114,6 +126,12 @@ impl JsLiteParseConfig {
                 OutputFormat::Text => "text".into(),
                 OutputFormat::Markdown => "markdown".into(),
             }),
+            image_mode: Some(match cfg.image_mode {
+                ImageMode::Off => "off".into(),
+                ImageMode::Placeholder => "placeholder".into(),
+                ImageMode::Embed => "embed".into(),
+            }),
+            extract_links: Some(cfg.extract_links),
             preserve_very_small_text: Some(cfg.preserve_very_small_text),
             password: cfg.password.clone(),
             quiet: Some(cfg.quiet),

@@ -926,8 +926,7 @@ fn classify_region(
 /// Classify a line that is *purely decorative* — no alphanumeric content, made
 /// up only of divider symbols (`* * * *`, `———`, `____`). Returns:
 ///   - `Some(true)`  → a section divider (≥3 symbols): emit a thematic break.
-///   - `Some(false)` → a lone 1–2 char flourish (a stray em-dash under a
-///                     title): drop it (too small to be a meaningful rule).
+///   - `Some(false)` → a lone 1–2 char, drop it, tool small
 ///   - `None`        → not decorative; classify normally.
 ///
 /// Without this, a `* * * *` divider line flows into the paragraph accumulator

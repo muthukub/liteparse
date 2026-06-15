@@ -737,8 +737,7 @@ fn form_lines(
                 // inter-cell gap, never a digit butted directly against a
                 // leading-decimal run, so this is safe to join silently.
                 let is_decimal_continuation = y_compatible
-                    && delta_x <= 1.0
-                    && delta_x >= -2.0
+                    && (-2.0..=1.0).contains(&delta_x)
                     && prev
                         .item
                         .text
@@ -4155,10 +4154,9 @@ fn xy_cut_rec(
     if !candidates
         .iter()
         .any(|c| c.axis == CutAxis::Vertical && (c.score - 1.0e9).abs() < 1.0)
+        && let Some(cc) = column_full
     {
-        if let Some(cp) = column_full {
-            candidates.push(cp);
-        }
+        candidates.push(cc);
     }
 
     for cut in candidates {
